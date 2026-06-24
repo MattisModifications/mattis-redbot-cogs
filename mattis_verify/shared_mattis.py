@@ -38,7 +38,7 @@ async def request_json(bot, method: str, path: str, *, json_body: Optional[dict[
 
 
 def embed(title: str, description: str | None = None, *, color: discord.Color = BRAND) -> discord.Embed:
-    e = discord.Embed(title=title, description=description or discord.Embed.Empty, color=color)
+    e = discord.Embed(title=title, description=description or None, color=color)
     e.set_footer(text="Mattis CMS")
     return e
 
