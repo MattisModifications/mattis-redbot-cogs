@@ -1,0 +1,9 @@
+{
+  "author": ["Mattis Productions"],
+  "install_msg": "Loaded Mattis CRM commands. Configure mattis_core first.",
+  "name": "mattis_crm",
+  "short": "Mattis CRM commands",
+  "description": "Mattis CRM commands for Mattis CMS Redbot integration.",
+  "tags": ["mattis", "cms", "office", "workspace"],
+  "requirements": []
+}

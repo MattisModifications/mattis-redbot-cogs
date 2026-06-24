@@ -1,0 +1,9 @@
+{
+  "author": ["Mattis Productions"],
+  "install_msg": "Loaded Mattis customer workspace commands. Configure mattis_core first.",
+  "name": "mattis_workspace",
+  "short": "Mattis customer workspace commands",
+  "description": "Mattis customer workspace commands for Mattis CMS Redbot integration.",
+  "tags": ["mattis", "cms", "office", "workspace"],
+  "requirements": []
+}

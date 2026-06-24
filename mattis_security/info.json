@@ -1,0 +1,9 @@
+{
+  "author": ["Mattis Productions"],
+  "install_msg": "Loaded Mattis security commands. Configure mattis_core first.",
+  "name": "mattis_security",
+  "short": "Mattis security commands",
+  "description": "Mattis security commands for Mattis CMS Redbot integration.",
+  "tags": ["mattis", "cms", "office", "workspace"],
+  "requirements": []
+}

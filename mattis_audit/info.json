@@ -1,0 +1,9 @@
+{
+  "author": ["Mattis Productions"],
+  "install_msg": "Loaded Mattis audit commands. Configure mattis_core first.",
+  "name": "mattis_audit",
+  "short": "Mattis audit commands",
+  "description": "Mattis audit commands for Mattis CMS Redbot integration.",
+  "tags": ["mattis", "cms", "office", "workspace"],
+  "requirements": []
+}

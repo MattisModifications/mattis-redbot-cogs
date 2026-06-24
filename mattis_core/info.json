@@ -1,0 +1,9 @@
+{
+  "author": ["Mattis Productions"],
+  "install_msg": "Loaded Mattis core configuration. Configure mattis_core first.",
+  "name": "mattis_core",
+  "short": "Mattis core configuration",
+  "description": "Mattis core configuration for Mattis CMS Redbot integration.",
+  "tags": ["mattis", "cms", "office", "workspace"],
+  "requirements": []
+}

@@ -1,0 +1,9 @@
+{
+  "author": ["Mattis Productions"],
+  "install_msg": "Loaded Mattis billing and invoice commands. Configure mattis_core first.",
+  "name": "mattis_billing",
+  "short": "Mattis billing and invoice commands",
+  "description": "Mattis billing and invoice commands for Mattis CMS Redbot integration.",
+  "tags": ["mattis", "cms", "office", "workspace"],
+  "requirements": []
+}
