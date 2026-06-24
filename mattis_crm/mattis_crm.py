@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from redbot.core import commands
-from shared_mattis import embed, request_json, fmt_payload
+from .shared_mattis import embed, request_json, fmt_payload
 
 
 class MattisCRM(commands.Cog):

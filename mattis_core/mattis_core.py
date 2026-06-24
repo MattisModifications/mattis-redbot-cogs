@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import discord
 from redbot.core import commands, Config
-from shared_mattis import embed, request_json, fmt_payload
+from .shared_mattis import embed, request_json, fmt_payload
 
 
 class MattisCore(commands.Cog):

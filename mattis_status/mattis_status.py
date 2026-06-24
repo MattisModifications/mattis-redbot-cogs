@@ -4,7 +4,7 @@ import time
 import aiohttp
 import discord
 from redbot.core import commands
-from shared_mattis import embed, request_json, fmt_payload, get_core_config
+from .shared_mattis import embed, request_json, fmt_payload, get_core_config
 
 
 class MattisStatus(commands.Cog):
