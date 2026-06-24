@@ -1,9 +1,0 @@
-{
-  "author": ["Mattis Productions"],
-  "install_msg": "Loaded Mattis internal office commands. Configure mattis_core first.",
-  "name": "mattis_office",
-  "short": "Mattis internal office commands",
-  "description": "Mattis internal office commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
-  "requirements": []
-}
