@@ -1,11 +1,10 @@
-from __future__ import annotations
-
 from redbot.core import commands
+
 from .shared_mattis import embed, request_json, fmt_payload
 
 
 class MattisAudit(commands.Cog):
-    """Audit log lookups."""
+    """Mattis audit operations."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -13,20 +12,29 @@ class MattisAudit(commands.Cog):
     @commands.group(name="maudit")
     @commands.has_permissions(manage_guild=True)
     async def maudit(self, ctx):
+        """Mattis audit commands."""
         if ctx.invoked_subcommand is None:
-            await ctx.send(embed=embed("Mattis Audit", "Commands: `maudit recent`, `maudit highrisk`, `maudit search <query>`"))
+            status, payload = await request_json(self.bot, "GET", "/bot/audit/recent")
+            e = embed("Recent Audit Events", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+            await ctx.send(embed=e)
 
     @maudit.command(name="recent")
     async def recent(self, ctx):
-        status, payload = await request_json(self.bot, "GET", "/bot/office/audit/recent")
-        await ctx.send(embed=embed(f"Recent audit → {status}", fmt_payload(payload)))
+        """Show recent audit events."""
+        status, payload = await request_json(self.bot, "GET", "/bot/audit/recent")
+        e = embed("Recent Audit Events", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+        await ctx.send(embed=e)
 
     @maudit.command(name="highrisk")
     async def highrisk(self, ctx):
-        status, payload = await request_json(self.bot, "GET", "/bot/office/audit/recent?risk=high")
-        await ctx.send(embed=embed(f"High-risk audit → {status}", fmt_payload(payload)))
+        """Show security risks."""
+        status, payload = await request_json(self.bot, "GET", "/bot/security/risks")
+        e = embed("High Risk Audit Signals", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+        await ctx.send(embed=e)
 
     @maudit.command(name="search")
     async def search(self, ctx, *, query: str):
-        status, payload = await request_json(self.bot, "GET", f"/bot/office/audit/search?q={query}")
-        await ctx.send(embed=embed(f"Audit search → {status}", fmt_payload(payload)))
+        """Search placeholder using recent audit feed."""
+        status, payload = await request_json(self.bot, "GET", "/bot/audit/recent")
+        e = embed(f"Audit Search: {query}", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+        await ctx.send(embed=e)
