@@ -17,11 +17,105 @@ from .shared_mattis import (
 )
 
 
+
+class PagedEmbedView(discord.ui.View):
+    def __init__(self, ctx, *, title: str, pages: list[str], color: discord.Color | None = None, timeout: int = 180):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.title = title
+        self.pages = pages or ["Nothing found."]
+        self.color = color
+        self.index = 0
+        self.sync_buttons()
+
+    def sync_buttons(self):
+        self.previous_page.disabled = self.index <= 0
+        self.next_page.disabled = self.index >= len(self.pages) - 1
+
+    def current_embed(self) -> discord.Embed:
+        e = embed(self.title, self.pages[self.index], color=self.color or discord.Color.from_rgb(28, 45, 74))
+        e.set_footer(text=f"Mattis CMS | Systems • Page {self.index + 1}/{len(self.pages)}")
+        return e
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these buttons.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = max(0, self.index - 1)
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+
 class MattisCore(commands.Cog):
     """Core configuration for Mattis CMS | Systems."""
 
     def __init__(self, bot):
         self.bot = bot
+
+    def build_pages(self, lines: list[str], *, empty: str = "Nothing found.", max_chars: int = 3200) -> list[str]:
+        if not lines:
+            return [empty]
+
+        pages: list[str] = []
+        current: list[str] = []
+        current_len = 0
+
+        for raw_line in lines:
+            line = str(raw_line)
+
+            if len(line) > max_chars:
+                if current:
+                    pages.append("\n".join(current))
+                    current = []
+                    current_len = 0
+
+                for i in range(0, len(line), max_chars):
+                    pages.append(line[i:i + max_chars])
+
+                continue
+
+            extra = len(line) + 1
+
+            if current and current_len + extra > max_chars:
+                pages.append("\n".join(current))
+                current = [line]
+                current_len = extra
+            else:
+                current.append(line)
+                current_len += extra
+
+        if current:
+            pages.append("\n".join(current))
+
+        return pages or [empty]
+
+    async def send_paginated(
+        self,
+        ctx,
+        title: str,
+        lines: list[str],
+        *,
+        empty: str = "Nothing found.",
+        color: discord.Color | None = None,
+    ):
+        pages = self.build_pages(lines, empty=empty)
+        view = PagedEmbedView(ctx, title=title, pages=pages, color=color)
+        await ctx.send(embed=view.current_embed(), view=view if len(pages) > 1 else None)
+
 
     def is_separator_role(self, role: discord.Role) -> bool:
         name = role.name
@@ -375,7 +469,7 @@ class MattisCore(commands.Cog):
 
     @scan.command(name="roles")
     async def scan_roles(self, ctx):
-        """Scan visible roles."""
+        """Scan all visible roles with pages."""
         if not await require_admin(ctx):
             return
 
@@ -391,11 +485,7 @@ class MattisCore(commands.Cog):
             else:
                 lines.append(self.role_risk_line(role, ctx.guild))
 
-            if len(lines) >= 25:
-                break
-
-        await ctx.send(embed=embed("Role Scan", trim("\n".join(lines), 3900)))
-
+        await self.send_paginated(ctx, "Role Scan", lines, empty="No roles found.")
     @scan.command(name="rolegroups")
     async def scan_rolegroups(self, ctx):
         """Scan dashed role headers and child roles."""
@@ -407,7 +497,7 @@ class MattisCore(commands.Cog):
 
     @scan.command(name="categories")
     async def scan_categories(self, ctx):
-        """Scan categories and bot permissions."""
+        """Scan all categories and bot permissions with pages."""
         if not await require_admin(ctx):
             return
 
@@ -417,14 +507,10 @@ class MattisCore(commands.Cog):
             perms = self.bot_perm_line(category)
             lines.append(f"**{category.name}** · pos `{category.position}` · channels `{len(category.channels)}`\n{perms}")
 
-            if len(lines) >= 12:
-                break
-
-        await ctx.send(embed=embed("Category Scan", trim("\n\n".join(lines), 3900)))
-
+        await self.send_paginated(ctx, "Category Scan", lines, empty="No categories found.")
     @scan.command(name="channels")
     async def scan_channels(self, ctx):
-        """Scan text channels, categories, sync state, and bot permissions."""
+        """Scan all text channels, categories, sync state, and bot permissions with pages."""
         if not await require_admin(ctx):
             return
 
@@ -433,14 +519,10 @@ class MattisCore(commands.Cog):
         for channel in sorted(ctx.guild.text_channels, key=lambda c: (c.category.position if c.category else 999, c.position)):
             lines.append(f"{self.channel_label(channel)}\n{self.bot_perm_line(channel)}")
 
-            if len(lines) >= 15:
-                break
-
-        await ctx.send(embed=embed("Channel Scan", trim("\n\n".join(lines), 3900)))
-
+        await self.send_paginated(ctx, "Channel Scan", lines, empty="No text channels found.")
     @scan.command(name="permissions")
     async def scan_permissions(self, ctx):
-        """Find channels where the bot cannot properly send embeds."""
+        """Find every channel where the bot cannot properly send embeds."""
         if not await require_admin(ctx):
             return
 
@@ -467,8 +549,13 @@ class MattisCore(commands.Cog):
             await ctx.send(embed=ok_embed("Permission Scan", "No obvious channel permission issues found."))
             return
 
-        await ctx.send(embed=embed("Permission Issues", trim("\n\n".join(issues[:15]), 3900), color=discord.Color.gold()))
-
+        await self.send_paginated(
+            ctx,
+            "Permission Issues",
+            issues,
+            empty="No permission issues found.",
+            color=discord.Color.gold(),
+        )
     @mcore.group(name="importgroups", invoke_without_command=True)
     async def importgroups(self, ctx):
         """Preview/apply dashed role group import."""
