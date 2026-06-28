@@ -50,7 +50,7 @@ class MattisCore(commands.Cog):
 
     @mcore.command(name="systemchannel")
     async def systemchannel(self, ctx, key: str, channel: discord.TextChannel):
-        """Map an systems channel, e.g. support #cms-support."""
+        """Map a Mattis Systems channel, e.g. support #cms-support."""
         channels = await self.config.systems_channels()
         channels[key.lower()] = channel.id
         await self.config.systems_channels.set(channels)
