@@ -1458,6 +1458,312 @@ class MattisCore(commands.Cog):
         )
 
 
+
+    def post_targets(self) -> dict:
+        return {
+            "status": {
+                "title": "Mattis Systems Status",
+                "path": "/bot/status",
+                "purpose": "status",
+            },
+            "overview": {
+                "title": "Mattis Systems Overview",
+                "path": "/bot/systems/overview",
+                "purpose": "management",
+            },
+            "support": {
+                "title": "Support Summary",
+                "path": "/bot/support/stats",
+                "purpose": "support",
+            },
+            "tickets": {
+                "title": "Open Support Tickets",
+                "path": "/bot/support/open",
+                "purpose": "ticket",
+            },
+            "billing": {
+                "title": "Billing Summary",
+                "path": "/bot/billing/summary",
+                "purpose": "billing",
+            },
+            "failed_invoices": {
+                "title": "Failed Billing Items",
+                "path": "/bot/billing/failed",
+                "purpose": "invoice",
+            },
+            "trials": {
+                "title": "Trial Subscriptions",
+                "path": "/bot/billing/trials",
+                "purpose": "billing",
+            },
+            "pastdue": {
+                "title": "Past Due Billing",
+                "path": "/bot/billing/pastdue",
+                "purpose": "payment",
+            },
+            "security": {
+                "title": "Security Risks",
+                "path": "/bot/security/risks",
+                "purpose": "security",
+            },
+            "sessions": {
+                "title": "Security Sessions",
+                "path": "/bot/security/sessions",
+                "purpose": "security_log",
+            },
+            "incidents": {
+                "title": "Incident Summary",
+                "path": "/bot/incidents/summary",
+                "purpose": "incident",
+            },
+            "audit": {
+                "title": "Recent Audit Events",
+                "path": "/bot/audit/recent",
+                "purpose": "audit_log",
+            },
+            "highrisk": {
+                "title": "High Risk Audit Events",
+                "path": "/bot/audit/highrisk",
+                "purpose": "audit_log",
+            },
+            "development": {
+                "title": "Development / Modules Summary",
+                "path": "/bot/modules/summary",
+                "purpose": "development",
+            },
+            "automation": {
+                "title": "Automation Summary",
+                "path": "/bot/automation/summary",
+                "purpose": "system_log",
+            },
+            "automation_failed": {
+                "title": "Failed Automation",
+                "path": "/bot/automation/failed",
+                "purpose": "system_error",
+            },
+            "discord": {
+                "title": "Discord Integration Summary",
+                "path": "/bot/discord/summary",
+                "purpose": "bot_log",
+            },
+            "roblox": {
+                "title": "Roblox Integration Summary",
+                "path": "/bot/roblox/summary",
+                "purpose": "system_log",
+            },
+            "applications": {
+                "title": "Applications Summary",
+                "path": "/bot/applications/summary",
+                "purpose": "support",
+            },
+            "staff": {
+                "title": "Staff Summary",
+                "path": "/bot/staff/summary",
+                "purpose": "staff",
+            },
+        }
+
+    def build_post_embed(self, target_key: str, target: dict, status: int, payload):
+        colour = discord.Color.green() if 200 <= int(status) < 400 else discord.Color.red()
+        e = embed(target["title"], color=colour)
+
+        e.add_field(name="Target", value=f"`{target_key}`", inline=True)
+        e.add_field(name="API", value=f"`HTTP {status}`", inline=True)
+        e.add_field(name="Endpoint", value=f"`{target['path']}`", inline=False)
+
+        if isinstance(payload, dict):
+            counts = payload.get("counts")
+
+            if isinstance(counts, dict):
+                for key, value in list(counts.items())[:12]:
+                    e.add_field(name=str(key).replace("_", " ").title(), value=str(value), inline=True)
+
+            else:
+                added = 0
+
+                for key, value in payload.items():
+                    if added >= 12:
+                        break
+
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        e.add_field(name=str(key).replace("_", " ").title(), value=str(value), inline=True)
+                        added += 1
+                    elif isinstance(value, list):
+                        e.add_field(name=str(key).replace("_", " ").title(), value=f"{len(value)} items", inline=True)
+                        added += 1
+                    elif isinstance(value, dict):
+                        e.add_field(name=str(key).replace("_", " ").title(), value=f"{len(value)} fields", inline=True)
+                        added += 1
+
+        preview = fmt_payload(payload)
+        e.add_field(name="Payload preview", value=preview[:1000], inline=False)
+
+        return e
+
+    @mcore.group(name="post", invoke_without_command=True)
+    async def post(self, ctx):
+        """Post Mattis API summaries into routed channels."""
+        if not await require_admin(ctx):
+            return
+
+        await ctx.send(embed=embed(
+            "Manual API Posting",
+            "Use:\n"
+            "`!mcore post list`\n"
+            "`!mcore post preview billing`\n"
+            "`!mcore post send billing`\n\n"
+            "This only posts when you manually run it."
+        ))
+
+    @post.command(name="list")
+    async def post_list(self, ctx):
+        """List available manual post targets."""
+        if not await require_admin(ctx):
+            return
+
+        targets = self.post_targets()
+        lines = []
+
+        for key, target in sorted(targets.items()):
+            selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, target["purpose"])
+            lines.append(
+                f"`{key}` → purpose `{target['purpose']}` → "
+                f"{channel.mention if channel else 'no usable route'}"
+            )
+
+        await self.send_paginated(
+            ctx,
+            "Manual Post Targets",
+            lines,
+            empty="No post targets configured.",
+        )
+
+    @post.command(name="preview")
+    async def post_preview(self, ctx, target_key: str):
+        """Preview where a post target will go without sending API data."""
+        if not await require_admin(ctx):
+            return
+
+        targets = self.post_targets()
+        clean_key = self.route_slug(target_key)
+        target = targets.get(clean_key)
+
+        if not target:
+            await ctx.send(embed=error_embed(
+                "Unknown post target",
+                f"`{clean_key}` is not valid. Run `!mcore post list`."
+            ))
+            return
+
+        selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, target["purpose"])
+
+        lines = [
+            f"Target: `{clean_key}`",
+            f"Title: **{target['title']}**",
+            f"Endpoint: `{target['path']}`",
+            f"Purpose: `{target['purpose']}`",
+            "",
+            "**Candidate routes:**",
+        ]
+
+        saved = await self.saved_routes(ctx.guild)
+
+        for candidate in candidates:
+            c = self.route_slug(candidate)
+            cid = saved.get(c)
+            ch = ctx.guild.get_channel(cid) if cid else None
+            marker = "✅ selected" if c == selected_key else "•"
+            lines.append(f"{marker} `{c}` → {ch.mention if ch else 'not saved'}")
+
+        await self.send_paginated(ctx, "Manual Post Preview", lines)
+
+    @post.command(name="send")
+    async def post_send(self, ctx, target_key: str):
+        """Fetch Mattis API data and post it to the correct routed channel."""
+        if not await require_admin(ctx):
+            return
+
+        targets = self.post_targets()
+        clean_key = self.route_slug(target_key)
+        target = targets.get(clean_key)
+
+        if not target:
+            await ctx.send(embed=error_embed(
+                "Unknown post target",
+                f"`{clean_key}` is not valid. Run `!mcore post list`."
+            ))
+            return
+
+        selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, target["purpose"])
+
+        if not channel:
+            lines = [
+                f"No usable route found for `{target['purpose']}`.",
+                "",
+                "**Tried:**",
+            ]
+            lines.extend(f"• `{self.route_slug(c)}`" for c in candidates)
+            await self.send_paginated(ctx, "Post Failed", lines, color=discord.Color.red())
+            return
+
+        status, payload = await request_json(self.bot, "GET", target["path"])
+        e = self.build_post_embed(clean_key, target, status, payload)
+        e.add_field(name="Route", value=f"`{selected_key}` → {channel.mention}", inline=False)
+        e.add_field(name="Triggered from", value=ctx.channel.mention, inline=True)
+
+        await channel.send(embed=e)
+        await ctx.send(embed=ok_embed(
+            "Post sent",
+            f"`{clean_key}` → `{selected_key}` → {channel.mention}"
+        ))
+
+    @post.command(name="sendmany")
+    async def post_sendmany(self, ctx, *target_keys: str):
+        """Send multiple manual posts."""
+        if not await require_admin(ctx):
+            return
+
+        if not target_keys:
+            await ctx.send(embed=error_embed(
+                "No targets provided",
+                "Example: `!mcore post sendmany status billing security incidents`"
+            ))
+            return
+
+        targets = self.post_targets()
+        results = []
+
+        for raw_key in target_keys[:10]:
+            clean_key = self.route_slug(raw_key)
+            target = targets.get(clean_key)
+
+            if not target:
+                results.append(f"❌ `{clean_key}` unknown target")
+                continue
+
+            selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, target["purpose"])
+
+            if not channel:
+                results.append(f"❌ `{clean_key}` no usable route")
+                continue
+
+            status, payload = await request_json(self.bot, "GET", target["path"])
+            e = self.build_post_embed(clean_key, target, status, payload)
+            e.add_field(name="Route", value=f"`{selected_key}` → {channel.mention}", inline=False)
+            e.add_field(name="Triggered from", value=ctx.channel.mention, inline=True)
+
+            await channel.send(embed=e)
+            results.append(f"✅ `{clean_key}` → `{selected_key}` → {channel.mention}")
+
+        await self.send_paginated(
+            ctx,
+            "Manual Post Results",
+            results,
+            empty="No posts sent.",
+            color=discord.Color.green(),
+        )
+
+
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):
         """Check saved routes against current Discord channels."""
