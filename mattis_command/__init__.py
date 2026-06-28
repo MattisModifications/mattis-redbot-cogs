@@ -1,4 +1,4 @@
-from .mattis_command import MattisCommand
+from .mattis_command import MattisSystems
 
 async def setup(bot):
-    await bot.add_cog(MattisCommand(bot))
+    await bot.add_cog(MattisSystems(bot))

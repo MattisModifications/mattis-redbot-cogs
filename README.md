@@ -6,7 +6,7 @@ This repo is designed as the Discord interface layer for Mattis CMS. It does not
 
 ## Cog split
 
-### Internal Mattis command cogs
+### Internal Mattis systems cogs
 - `mattis_core` — shared API URL/token/channel config and request helper.
 - `mattis_status` — quick uptime/health checks.
 - `mattis_command` — internal command links and customer lookup shell.

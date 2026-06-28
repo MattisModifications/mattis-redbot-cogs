@@ -1,6 +1,15 @@
 from redbot.core import commands
 
-from .shared_mattis import embed, request_json, fmt_payload
+from .shared_mattis import (
+    embed,
+    request_json,
+    require_admin,
+    simple_counts_embed,
+    line_list,
+    invoice_line,
+    workspace_line,
+    q,
+)
 
 
 class MattisBilling(commands.Cog):
@@ -9,39 +18,72 @@ class MattisBilling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.group(name="mbilling")
-    @commands.has_permissions(manage_guild=True)
+    @commands.group(name="mbilling", invoke_without_command=True)
     async def mbilling(self, ctx):
-        """Mattis billing commands."""
-        if ctx.invoked_subcommand is None:
-            status, payload = await request_json(self.bot, "GET", "/bot/billing/summary")
-            e = embed("Billing Summary", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
-            await ctx.send(embed=e)
+        if not await require_admin(ctx):
+            return
+        await self.summary(ctx)
 
     @mbilling.command(name="summary")
     async def summary(self, ctx):
-        """Show billing summary."""
-        status, payload = await request_json(self.bot, "GET", "/bot/billing/summary")
-        e = embed("Billing Summary", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
-        await ctx.send(embed=e)
+        if not await require_admin(ctx):
+            return
 
-    @mbilling.command(name="customer")
-    async def customer(self, ctx, *, query: str):
-        """Search billing customer via CRM."""
-        status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={query}")
-        e = embed("Billing Customer Search", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
-        await ctx.send(embed=e)
-
-    @mbilling.command(name="invoices")
-    async def invoices(self, ctx, *, query: str = ""):
-        """Show invoice summary."""
         status, payload = await request_json(self.bot, "GET", "/bot/billing/summary")
-        e = embed("Invoices", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+        e = simple_counts_embed("Billing Summary", payload if status == 200 else {})
+
+        recent = payload.get("recent", []) if isinstance(payload, dict) else []
+        e.add_field(name="Recent invoices", value=line_list(recent, invoice_line, empty="No recent invoices."), inline=False)
+
         await ctx.send(embed=e)
 
     @mbilling.command(name="failed")
     async def failed(self, ctx):
-        """Show failed invoice summary."""
-        status, payload = await request_json(self.bot, "GET", "/bot/billing/summary")
-        e = embed("Failed Billing", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", "/bot/billing/failed")
+        await ctx.send(embed=embed("Failed Billing", line_list(payload.get("invoices", []), invoice_line, empty="No failed invoices.")))
+
+    @mbilling.command(name="trials")
+    async def trials(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", "/bot/billing/trials")
+        await ctx.send(embed=embed("Trial Subscriptions", f"Count: {payload.get('count', 0)}"))
+
+    @mbilling.command(name="pastdue")
+    async def pastdue(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", "/bot/billing/pastdue")
+        await ctx.send(embed=embed("Past-Due Subscriptions", f"Count: {payload.get('count', 0)}"))
+
+    @mbilling.command(name="customer")
+    async def customer(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", f"/bot/billing/customer?q={q(query)}")
+
+        e = embed(f"Customer Billing: {query}")
+
+        if status == 200:
+            e.add_field(name="Workspace", value=workspace_line(payload.get("workspace", {})), inline=False)
+            e.add_field(name="Invoices", value=line_list(payload.get("invoices", []), invoice_line, empty="No invoices."), inline=False)
+        else:
+            e.description = f"HTTP {status}"
+
         await ctx.send(embed=e)
+
+    @mbilling.command(name="invoices")
+    async def invoices(self, ctx, *, query: str = ""):
+        if not await require_admin(ctx):
+            return
+
+        if query:
+            await self.customer(ctx, query=query)
+        else:
+            await self.summary(ctx)

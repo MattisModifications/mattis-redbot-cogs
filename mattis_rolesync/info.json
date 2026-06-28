@@ -5,13 +5,12 @@
   "install_msg": "Loaded Mattis workspace role sync commands. Configure mattis_core first.",
   "name": "mattis_rolesync",
   "short": "Mattis workspace role sync commands",
-  "description": "Mattis workspace role sync commands for Mattis CMS Redbot integration.",
+  "description": "Mattis CMS | Systems cog.",
   "tags": [
     "mattis",
     "cms",
-    "systems",
-    "workspace"
+    "systems"
   ],
   "requirements": [],
-  "version": "1.0.1"
+  "version": "2.0.0"
 }

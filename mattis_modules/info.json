@@ -1,0 +1,20 @@
+{
+  "author": [
+    "Mattis Productions"
+  ],
+  "install_msg": "MattisModules loaded for Mattis CMS | Systems.",
+  "name": "mattis_modules",
+  "short": "Mattis CMS | Systems cog.",
+  "description": "Internal Mattis CMS systems/admin bot cog.",
+  "tags": [
+    "mattis",
+    "cms",
+    "systems"
+  ],
+  "requirements": [
+    "aiohttp"
+  ],
+  "min_bot_version": "3.5.0",
+  "end_user_data_statement": "This cog stores configuration for Mattis CMS | Systems and queries the Mattis API using a private token.",
+  "version": "2.0.0"
+}

@@ -1,6 +1,14 @@
 from redbot.core import commands
 
-from .shared_mattis import embed, request_json, fmt_payload
+from .shared_mattis import (
+    embed,
+    request_json,
+    require_admin,
+    simple_counts_embed,
+    line_list,
+    user_line,
+    q,
+)
 
 
 class MattisSecurity(commands.Cog):
@@ -9,32 +17,62 @@ class MattisSecurity(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.group(name="msecurity")
-    @commands.has_permissions(manage_guild=True)
+    @commands.group(name="msecurity", invoke_without_command=True)
     async def msecurity(self, ctx):
-        """Mattis security commands."""
-        if ctx.invoked_subcommand is None:
-            status, payload = await request_json(self.bot, "GET", "/bot/security/risks")
-            e = embed("Security Risks", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
-            await ctx.send(embed=e)
+        if not await require_admin(ctx):
+            return
+        await self.risks(ctx)
 
     @msecurity.command(name="risks")
     async def risks(self, ctx):
-        """Show security risk signals."""
+        if not await require_admin(ctx):
+            return
+
         status, payload = await request_json(self.bot, "GET", "/bot/security/risks")
-        e = embed("Security Risks", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
+        e = simple_counts_embed("Security Risks", payload.get("signals", {}) if isinstance(payload, dict) else {})
+
+        if isinstance(payload, dict):
+            e.description = f"Risk level: **{payload.get('riskLevel', 'unknown')}**"
+
         await ctx.send(embed=e)
+
+    @msecurity.command(name="sessions")
+    async def sessions(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", "/bot/security/sessions")
+        await ctx.send(embed=embed("Auth Sessions", f"Count: {payload.get('count', 0)}"))
+
+    @msecurity.command(name="admins")
+    async def admins(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", "/bot/security/admins")
+        await ctx.send(embed=embed("Platform Admin Users", line_list(payload.get("users", []), user_line, empty="No admin users found.")))
+
+    @msecurity.command(name="suspicious")
+    async def suspicious(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", "/bot/security/suspicious")
+        await ctx.send(embed=embed("Suspicious Activity", f"Events: {payload.get('count', 0)}"))
 
     @msecurity.command(name="user")
     async def user(self, ctx, *, query: str):
-        """Search a user via CRM."""
-        status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={query}")
-        e = embed("Security User Search", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
-        await ctx.send(embed=e)
+        if not await require_admin(ctx):
+            return
+
+        status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={q(query)}")
+        await ctx.send(embed=embed(f"Security User Lookup: {query}", line_list(payload.get("users", []), user_line, empty="No users found.")))
 
     @msecurity.command(name="failedlogins")
-    async def failedlogins(self, ctx):
-        """Show security risk signals."""
-        status, payload = await request_json(self.bot, "GET", "/bot/security/risks")
-        e = embed("Failed Login Signals", fmt_payload(payload) if status == 200 else f"API error {status}: {payload}")
-        await ctx.send(embed=e)
+    @msecurity.command(name="permissions")
+    @msecurity.command(name="tokens")
+    @msecurity.command(name="config")
+    async def placeholder(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.risks(ctx)
