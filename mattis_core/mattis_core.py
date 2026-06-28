@@ -2840,12 +2840,25 @@ class MattisCore(commands.Cog):
         await self.send_paginated(ctx, "Log Forwarding Rules", lines)
 
     @logs.command(name="preview")
-    async def logs_preview(self, ctx):
-        """Preview which logs would be posted without sending."""
+    async def logs_preview(self, ctx, *rule_keys: str):
+        """Preview which logs would be posted without sending. Optional: !mcore logs preview audit_recent"""
         if not await require_admin(ctx):
             return
 
-        results = await self.run_log_checks(ctx.guild, dry_run=True, force=False)
+        started = await ctx.send(embed=embed(
+            "Log Preview Started",
+            "Checking log rules now. This may take a moment if the API has lots of records."
+        ))
+
+        if rule_keys:
+            results = []
+            for raw_key in rule_keys[:10]:
+                key = self.route_slug(raw_key)
+                result = await self.run_one_log_rule(ctx.guild, key, dry_run=True, force=False)
+                results.append(result)
+        else:
+            results = await self.run_log_checks(ctx.guild, dry_run=True, force=False)
+
         lines = []
 
         for r in results:
@@ -2854,15 +2867,31 @@ class MattisCore(commands.Cog):
                 + (f" · route `{r.get('route')}`" if r.get("route") else "")
             )
 
-        await self.send_paginated(ctx, "Log Preview", lines)
+        pages = self.build_pages(lines, empty="No log rules checked.")
+        view = PagedEmbedView(ctx, title="Log Preview", pages=pages, color=None)
+
+        await started.edit(embed=view.current_embed(), view=view if len(pages) > 1 else None)
 
     @logs.command(name="check")
-    async def logs_check(self, ctx):
-        """Forward new unseen logs now."""
+    async def logs_check(self, ctx, *rule_keys: str):
+        """Forward new unseen logs now. Optional: !mcore logs check audit_recent"""
         if not await require_admin(ctx):
             return
 
-        results = await self.run_log_checks(ctx.guild, dry_run=False, force=False)
+        started = await ctx.send(embed=embed(
+            "Log Forwarding Started",
+            "Forwarding new unseen logs now. I will edit this message when finished."
+        ))
+
+        if rule_keys:
+            results = []
+            for raw_key in rule_keys[:10]:
+                key = self.route_slug(raw_key)
+                result = await self.run_one_log_rule(ctx.guild, key, dry_run=False, force=False)
+                results.append(result)
+        else:
+            results = await self.run_log_checks(ctx.guild, dry_run=False, force=False)
+
         lines = []
 
         for r in results:
@@ -2871,15 +2900,31 @@ class MattisCore(commands.Cog):
                 + (f" · route `{r.get('route')}`" if r.get("route") else "")
             )
 
-        await self.send_paginated(ctx, "Log Forwarding Check", lines)
+        pages = self.build_pages(lines, empty="No log forwarding results.")
+        view = PagedEmbedView(ctx, title="Log Forwarding Check", pages=pages, color=discord.Color.green())
+
+        await started.edit(embed=view.current_embed(), view=view if len(pages) > 1 else None)
 
     @logs.command(name="force")
-    async def logs_force(self, ctx):
-        """Force post current log payloads even if already seen."""
+    async def logs_force(self, ctx, *rule_keys: str):
+        """Force post current log payloads even if already seen. Optional: !mcore logs force audit_recent"""
         if not await require_admin(ctx):
             return
 
-        results = await self.run_log_checks(ctx.guild, dry_run=False, force=True)
+        started = await ctx.send(embed=embed(
+            "Forced Log Forwarding Started",
+            "Force-posting current logs now. This can take a moment."
+        ))
+
+        if rule_keys:
+            results = []
+            for raw_key in rule_keys[:10]:
+                key = self.route_slug(raw_key)
+                result = await self.run_one_log_rule(ctx.guild, key, dry_run=False, force=True)
+                results.append(result)
+        else:
+            results = await self.run_log_checks(ctx.guild, dry_run=False, force=True)
+
         lines = []
 
         for r in results:
@@ -2888,7 +2933,11 @@ class MattisCore(commands.Cog):
                 + (f" · route `{r.get('route')}`" if r.get("route") else "")
             )
 
-        await self.send_paginated(ctx, "Forced Log Forwarding", lines)
+        pages = self.build_pages(lines, empty="No forced log results.")
+        view = PagedEmbedView(ctx, title="Forced Log Forwarding", pages=pages, color=discord.Color.green())
+
+        await started.edit(embed=view.current_embed(), view=view if len(pages) > 1 else None)
+
 
     @logs.command(name="enable")
     async def logs_enable(self, ctx):
