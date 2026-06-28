@@ -71,9 +71,12 @@ class MattisCore(commands.Cog):
         self.bot = bot
         if not self.alert_loop.is_running():
             self.alert_loop.start()
+        if not self.log_loop.is_running():
+            self.log_loop.start()
 
     def cog_unload(self):
         self.alert_loop.cancel()
+        self.log_loop.cancel()
 
     def build_pages(self, lines: list[str], *, empty: str = "Nothing found.", max_chars: int = 3200) -> list[str]:
         if not lines:
@@ -2456,6 +2459,533 @@ class MattisCore(commands.Cog):
 
         await self.save_alert_state(ctx.guild, {"rules": {}})
         await ctx.send(embed=ok_embed("Alert state reset", "Cooldown and duplicate state cleared."))
+
+
+
+    def log_rules(self) -> dict:
+        return {
+            "audit_recent": {
+                "title": "Audit Log",
+                "path": "/bot/audit/recent",
+                "purpose": "audit_log",
+            },
+            "audit_highrisk": {
+                "title": "High Risk Audit Log",
+                "path": "/bot/audit/highrisk",
+                "purpose": "audit_log",
+            },
+            "support_all": {
+                "title": "Support Ticket Log",
+                "path": "/bot/support/all",
+                "purpose": "ticket_log",
+            },
+            "support_open": {
+                "title": "Open Ticket Log",
+                "path": "/bot/support/open",
+                "purpose": "ticket_log",
+            },
+            "support_critical": {
+                "title": "Critical Ticket Log",
+                "path": "/bot/support/critical",
+                "purpose": "incident_log",
+            },
+            "billing_failed": {
+                "title": "Failed Billing Log",
+                "path": "/bot/billing/failed",
+                "purpose": "payment_log",
+            },
+            "billing_pastdue": {
+                "title": "Past Due Billing Log",
+                "path": "/bot/billing/pastdue",
+                "purpose": "payment_log",
+            },
+            "billing_trials": {
+                "title": "Trial Billing Log",
+                "path": "/bot/billing/trials",
+                "purpose": "payment_log",
+            },
+            "security_risks": {
+                "title": "Security Risk Log",
+                "path": "/bot/security/risks",
+                "purpose": "security_log",
+            },
+            "security_sessions": {
+                "title": "Security Session Log",
+                "path": "/bot/security/sessions",
+                "purpose": "security_log",
+            },
+            "security_suspicious": {
+                "title": "Suspicious Activity Log",
+                "path": "/bot/security/suspicious",
+                "purpose": "security_log",
+            },
+            "discord_summary": {
+                "title": "Discord Integration Log",
+                "path": "/bot/discord/summary",
+                "purpose": "bot_log",
+            },
+            "discord_broken": {
+                "title": "Broken Discord Integration Log",
+                "path": "/bot/discord/broken",
+                "purpose": "bot_log",
+            },
+            "roblox_summary": {
+                "title": "Roblox Integration Log",
+                "path": "/bot/roblox/summary",
+                "purpose": "system_log",
+            },
+            "roblox_broken": {
+                "title": "Broken Roblox Integration Log",
+                "path": "/bot/roblox/broken",
+                "purpose": "system_log",
+            },
+            "automation_failed": {
+                "title": "Failed Automation Log",
+                "path": "/bot/automation/failed",
+                "purpose": "system_log",
+            },
+            "incidents": {
+                "title": "Incident Log",
+                "path": "/bot/incidents/summary",
+                "purpose": "incident_log",
+            },
+            "modules": {
+                "title": "Module Log",
+                "path": "/bot/modules/summary",
+                "purpose": "system_log",
+            },
+            "applications_recent": {
+                "title": "Application Log",
+                "path": "/bot/applications/recent",
+                "purpose": "ticket_log",
+            },
+            "staff_summary": {
+                "title": "Staff Log",
+                "path": "/bot/staff/summary",
+                "purpose": "member_log",
+            },
+        }
+
+    async def get_log_settings(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        settings = await cfg.guild(guild).log_settings()
+        settings = settings or {}
+        settings.setdefault("enabled", False)
+        settings.setdefault("interval_minutes", 5)
+        settings.setdefault("rules_enabled", {})
+        settings.setdefault("post_summaries", True)
+        settings.setdefault("post_items", True)
+        settings.setdefault("max_items_per_rule", 25)
+        return settings
+
+    async def save_log_settings(self, guild: discord.Guild, settings: dict):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).log_settings.set(settings)
+
+    async def get_log_state(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        state = await cfg.guild(guild).log_state()
+        state = state or {}
+        state.setdefault("rules", {})
+        return state
+
+    async def save_log_state(self, guild: discord.Guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).log_state.set(state)
+
+    def is_log_rule_enabled(self, settings: dict, rule_key: str) -> bool:
+        rules_enabled = settings.get("rules_enabled", {}) or {}
+        return bool(rules_enabled.get(rule_key, True))
+
+    def extract_log_items(self, payload) -> list:
+        if payload is None:
+            return []
+
+        if isinstance(payload, list):
+            return payload
+
+        if not isinstance(payload, dict):
+            return [{"value": payload}]
+
+        keys = [
+            "items",
+            "results",
+            "data",
+            "records",
+            "events",
+            "logs",
+            "tickets",
+            "invoices",
+            "sessions",
+            "risks",
+            "runs",
+            "workflows",
+            "applications",
+            "submissions",
+            "broken",
+            "failed",
+        ]
+
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+
+        # If there is no item list, log the whole summary as one record.
+        return [payload]
+
+    def log_item_id(self, rule_key: str, item) -> str:
+        if isinstance(item, dict):
+            for key in ["id", "eventId", "event_id", "ticketId", "ticket_id", "invoiceId", "invoice_id", "sessionId", "session_id"]:
+                value = item.get(key)
+                if value:
+                    return f"{rule_key}:{value}"
+
+        try:
+            raw = json.dumps(item, sort_keys=True, default=str)
+        except Exception:
+            raw = str(item)
+
+        return f"{rule_key}:{hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()}"
+
+    def log_item_title(self, rule_key: str, rule: dict, item) -> str:
+        if isinstance(item, dict):
+            for key in ["title", "subject", "action", "type", "event", "name", "status"]:
+                value = item.get(key)
+                if value:
+                    return f"{rule['title']} · {str(value)[:80]}"
+
+        return rule["title"]
+
+    def build_log_embed(self, rule_key: str, rule: dict, item, route_key: str, index: int, total: int):
+        e = embed(self.log_item_title(rule_key, rule, item), color=discord.Color.blue())
+        e.add_field(name="Log rule", value=f"`{rule_key}`", inline=True)
+        e.add_field(name="Route", value=f"`{route_key}`", inline=True)
+        e.add_field(name="Item", value=f"`{index}/{total}`", inline=True)
+        e.add_field(name="Endpoint", value=f"`{rule['path']}`", inline=False)
+
+        if isinstance(item, dict):
+            added = 0
+            for key, value in item.items():
+                if added >= 10:
+                    break
+
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    e.add_field(name=str(key).replace("_", " ").title(), value=trim(value, 1000), inline=True)
+                    added += 1
+
+            e.add_field(name="Raw preview", value=fmt_payload(item)[:900], inline=False)
+        else:
+            e.add_field(name="Raw preview", value=trim(item, 1000), inline=False)
+
+        return e
+
+    async def run_one_log_rule(self, guild: discord.Guild, rule_key: str, *, dry_run: bool = False, force: bool = False) -> dict:
+        settings = await self.get_log_settings(guild)
+
+        if not self.is_log_rule_enabled(settings, rule_key):
+            return {"rule": rule_key, "status": "disabled", "sent": 0, "seen": 0}
+
+        rules = self.log_rules()
+        rule = rules.get(rule_key)
+
+        if not rule:
+            return {"rule": rule_key, "status": "unknown_rule", "sent": 0, "seen": 0}
+
+        selected_key, channel, candidates = await self.resolve_dispatch_route(guild, rule["purpose"])
+
+        if not channel:
+            return {"rule": rule_key, "status": "no_route", "sent": 0, "seen": 0, "candidates": candidates}
+
+        status, payload = await request_json(self.bot, "GET", rule["path"])
+
+        if status >= 400:
+            item = {"api_status": status, "error_payload": payload}
+            items = [item]
+        else:
+            items = self.extract_log_items(payload)
+
+        max_items = max(1, int(settings.get("max_items_per_rule", 25)))
+        items = items[:max_items]
+
+        state = await self.get_log_state(guild)
+        rule_state = state.setdefault("rules", {}).setdefault(rule_key, {})
+        seen_ids = set(rule_state.get("seen_ids", []))
+
+        sent = 0
+        skipped = 0
+        new_seen = list(seen_ids)
+
+        total = len(items)
+
+        for index, item in enumerate(items, start=1):
+            item_id = self.log_item_id(rule_key, item)
+
+            if not force and item_id in seen_ids:
+                skipped += 1
+                continue
+
+            if dry_run:
+                sent += 1
+                continue
+
+            e = self.build_log_embed(rule_key, rule, item, selected_key, index, total)
+            await channel.send(embed=e)
+
+            sent += 1
+
+            if item_id not in new_seen:
+                new_seen.append(item_id)
+
+        # Keep enough seen IDs to prevent duplicates, without growing forever.
+        rule_state["seen_ids"] = new_seen[-1000:]
+        rule_state["last_run"] = int(time.time())
+        rule_state["last_status"] = status
+        rule_state["last_route"] = selected_key
+
+        if not dry_run:
+            await self.save_log_state(guild, state)
+
+        return {
+            "rule": rule_key,
+            "status": f"http_{status}",
+            "sent": sent,
+            "skipped": skipped,
+            "seen": total,
+            "route": selected_key,
+        }
+
+    async def run_log_checks(self, guild: discord.Guild, *, dry_run: bool = False, force: bool = False) -> list[dict]:
+        results = []
+
+        for rule_key in self.log_rules().keys():
+            try:
+                result = await self.run_one_log_rule(guild, rule_key, dry_run=dry_run, force=force)
+            except Exception as exc:
+                result = {
+                    "rule": rule_key,
+                    "status": f"error: {type(exc).__name__}: {exc}",
+                    "sent": 0,
+                    "seen": 0,
+                }
+
+            results.append(result)
+
+        return results
+
+    @tasks.loop(minutes=5)
+    async def log_loop(self):
+        if not self.bot.is_ready():
+            return
+
+        for guild in list(self.bot.guilds):
+            settings = await self.get_log_settings(guild)
+
+            if not settings.get("enabled", False):
+                continue
+
+            state = await self.get_log_state(guild)
+            now = int(time.time())
+            interval_seconds = max(1, int(settings.get("interval_minutes", 5))) * 60
+            last_run = int(state.get("_last_run", 0))
+
+            if now - last_run < interval_seconds:
+                continue
+
+            state["_last_run"] = now
+            await self.save_log_state(guild, state)
+
+            await self.run_log_checks(guild, dry_run=False, force=False)
+
+    @mcore.group(name="logs", invoke_without_command=True)
+    async def logs(self, ctx):
+        """Full log forwarding engine."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_log_settings(ctx.guild)
+        state = await self.get_log_state(ctx.guild)
+
+        e = embed("Mattis Log Forwarding Engine")
+        e.add_field(name="Enabled", value="✅ yes" if settings.get("enabled") else "❌ no", inline=True)
+        e.add_field(name="Interval", value=f"`{settings.get('interval_minutes', 5)} min`", inline=True)
+        e.add_field(name="Max items/rule", value=f"`{settings.get('max_items_per_rule', 25)}`", inline=True)
+        e.add_field(name="Rules", value=f"`{len(self.log_rules())}`", inline=True)
+        e.add_field(name="Last run", value=f"<t:{int(state.get('_last_run', 0))}:R>" if state.get("_last_run") else "Never", inline=True)
+        e.add_field(
+            name="Commands",
+            value="`!mcore logs list`\n`!mcore logs preview`\n`!mcore logs check`\n`!mcore logs force`\n`!mcore logs enable`\n`!mcore logs disable`",
+            inline=False,
+        )
+
+        await ctx.send(embed=e)
+
+    @logs.command(name="list")
+    async def logs_list(self, ctx):
+        """List log forwarding rules."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_log_settings(ctx.guild)
+        lines = []
+
+        for rule_key, rule in self.log_rules().items():
+            enabled = self.is_log_rule_enabled(settings, rule_key)
+            selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, rule["purpose"])
+            lines.append(
+                f"{'✅' if enabled else '❌'} `{rule_key}` → purpose `{rule['purpose']}` → "
+                f"{channel.mention if channel else 'no usable route'}"
+            )
+
+        await self.send_paginated(ctx, "Log Forwarding Rules", lines)
+
+    @logs.command(name="preview")
+    async def logs_preview(self, ctx):
+        """Preview which logs would be posted without sending."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.run_log_checks(ctx.guild, dry_run=True, force=False)
+        lines = []
+
+        for r in results:
+            lines.append(
+                f"`{r['rule']}` · `{r.get('status')}` · seen `{r.get('seen', 0)}` · would-send `{r.get('sent', 0)}`"
+                + (f" · route `{r.get('route')}`" if r.get("route") else "")
+            )
+
+        await self.send_paginated(ctx, "Log Preview", lines)
+
+    @logs.command(name="check")
+    async def logs_check(self, ctx):
+        """Forward new unseen logs now."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.run_log_checks(ctx.guild, dry_run=False, force=False)
+        lines = []
+
+        for r in results:
+            lines.append(
+                f"`{r['rule']}` · `{r.get('status')}` · seen `{r.get('seen', 0)}` · sent `{r.get('sent', 0)}` · skipped `{r.get('skipped', 0)}`"
+                + (f" · route `{r.get('route')}`" if r.get("route") else "")
+            )
+
+        await self.send_paginated(ctx, "Log Forwarding Check", lines)
+
+    @logs.command(name="force")
+    async def logs_force(self, ctx):
+        """Force post current log payloads even if already seen."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.run_log_checks(ctx.guild, dry_run=False, force=True)
+        lines = []
+
+        for r in results:
+            lines.append(
+                f"`{r['rule']}` · `{r.get('status')}` · seen `{r.get('seen', 0)}` · force-sent `{r.get('sent', 0)}`"
+                + (f" · route `{r.get('route')}`" if r.get("route") else "")
+            )
+
+        await self.send_paginated(ctx, "Forced Log Forwarding", lines)
+
+    @logs.command(name="enable")
+    async def logs_enable(self, ctx):
+        """Enable background log forwarding."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_log_settings(ctx.guild)
+        settings["enabled"] = True
+        await self.save_log_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log forwarding enabled", "Every new log item will be forwarded to routed log channels."))
+
+    @logs.command(name="disable")
+    async def logs_disable(self, ctx):
+        """Disable background log forwarding."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_log_settings(ctx.guild)
+        settings["enabled"] = False
+        await self.save_log_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log forwarding disabled"))
+
+    @logs.command(name="interval")
+    async def logs_interval(self, ctx, minutes: int):
+        """Set log forwarding interval."""
+        if not await require_admin(ctx):
+            return
+
+        minutes = max(1, min(int(minutes), 1440))
+        settings = await self.get_log_settings(ctx.guild)
+        settings["interval_minutes"] = minutes
+        await self.save_log_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log interval saved", f"Log forwarding interval is now `{minutes}` minutes."))
+
+    @logs.command(name="limit")
+    async def logs_limit(self, ctx, count: int):
+        """Set max items per rule per check."""
+        if not await require_admin(ctx):
+            return
+
+        count = max(1, min(int(count), 100))
+        settings = await self.get_log_settings(ctx.guild)
+        settings["max_items_per_rule"] = count
+        await self.save_log_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log limit saved", f"Max items per rule is now `{count}`."))
+
+    @logs.command(name="ruleoff")
+    async def logs_ruleoff(self, ctx, rule_key: str):
+        """Disable one log rule."""
+        if not await require_admin(ctx):
+            return
+
+        rule_key = self.route_slug(rule_key)
+
+        if rule_key not in self.log_rules():
+            await ctx.send(embed=error_embed("Unknown log rule", f"`{rule_key}` is not valid."))
+            return
+
+        settings = await self.get_log_settings(ctx.guild)
+        rules_enabled = settings.setdefault("rules_enabled", {})
+        rules_enabled[rule_key] = False
+        await self.save_log_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log rule disabled", f"`{rule_key}` disabled."))
+
+    @logs.command(name="ruleon")
+    async def logs_ruleon(self, ctx, rule_key: str):
+        """Enable one log rule."""
+        if not await require_admin(ctx):
+            return
+
+        rule_key = self.route_slug(rule_key)
+
+        if rule_key not in self.log_rules():
+            await ctx.send(embed=error_embed("Unknown log rule", f"`{rule_key}` is not valid."))
+            return
+
+        settings = await self.get_log_settings(ctx.guild)
+        rules_enabled = settings.setdefault("rules_enabled", {})
+        rules_enabled[rule_key] = True
+        await self.save_log_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log rule enabled", f"`{rule_key}` enabled."))
+
+    @logs.command(name="reset")
+    async def logs_reset(self, ctx):
+        """Clear seen-log dedupe state."""
+        if not await require_admin(ctx):
+            return
+
+        await self.save_log_state(ctx.guild, {"rules": {}})
+        await ctx.send(embed=ok_embed("Log state reset", "Seen-log state cleared. Next check can post current logs again."))
 
 
     @mcore.command(name="routecheck")
