@@ -34,6 +34,7 @@ async def get_core_config(bot) -> Config:
         log_state={},
         notify_settings={},
         eventlog_settings={},
+        capabilities={},
     )
     return cfg
 
@@ -467,3 +468,366 @@ def simple_counts_embed(title: str, payload: dict[str, Any]) -> discord.Embed:
         add_fields(e, counts)
 
     return e
+
+
+
+# ------------------------------
+# Mattis least-privilege capability system
+# ------------------------------
+
+CAPABILITY_DEFAULTS = {
+    # full/core control
+    "core_admin": ["founder", "administrator"],
+
+    # management/business
+    "management_view": ["founder", "director", "executive"],
+    "finance_view": ["director", "executive"],
+
+    # support split
+    "general_support": ["supportagent", "supportlead"],
+    "support_lead": ["supportlead"],
+    "billing_support": ["billingsupport"],
+    "technical_support": ["technicalsupport"],
+    "security_support": ["securitysupport"],
+
+    # moderation / incident / audit split
+    "moderation": ["moderator", "seniormoderator"],
+    "incident_response": ["incidentresponse"],
+    "audit_review": ["auditreviewer"],
+
+    # admin specialists
+    "security_admin": ["securityadmin"],
+    "infrastructure_admin": ["infrastructureadmin"],
+
+    # development split
+    "development_read": ["developer", "leaddeveloper", "qatester", "releasemanager"],
+    "backend_access": ["developer", "leaddeveloper"],
+    "production_access": ["leaddeveloper", "infrastructureadmin"],
+    "release_manager": ["releasemanager"],
+    "qa_testing": ["qatester"],
+    "design_access": ["designer"],
+
+    # system-specific
+    "discord_systems": ["developer", "leaddeveloper", "infrastructureadmin"],
+    "roblox_systems": ["developer", "leaddeveloper", "infrastructureadmin"],
+    "automation_access": ["leaddeveloper", "infrastructureadmin"],
+}
+
+
+def capability_role_slug(value: str) -> str:
+    return norm(value)
+
+
+def default_capabilities_for_guild(guild: discord.Guild) -> dict[str, list[int]]:
+    caps: dict[str, list[int]] = {key: [] for key in CAPABILITY_DEFAULTS.keys()}
+
+    if not guild:
+        return caps
+
+    for role in guild.roles:
+        if role == guild.default_role or role.managed:
+            continue
+
+        role_slug = capability_role_slug(role.name)
+
+        for capability, keywords in CAPABILITY_DEFAULTS.items():
+            for keyword in keywords:
+                if keyword in role_slug:
+                    if role.id not in caps[capability]:
+                        caps[capability].append(role.id)
+
+    return caps
+
+
+async def get_capability_map(ctx) -> dict[str, list[int]]:
+    cfg = await get_core_config(ctx.bot)
+    saved = await cfg.guild(ctx.guild).capabilities()
+    saved = saved or {}
+
+    if not saved:
+        return default_capabilities_for_guild(ctx.guild)
+
+    clean: dict[str, list[int]] = {}
+
+    for key, ids in saved.items():
+        cap_key = norm(key)
+        clean[cap_key] = [int(x) for x in ids or []]
+
+    for key in CAPABILITY_DEFAULTS.keys():
+        clean.setdefault(key, [])
+
+    return clean
+
+
+async def member_has_capability(ctx, *capabilities: str) -> bool:
+    if not ctx.guild:
+        return False
+
+    wanted = {norm(cap) for cap in capabilities}
+    caps = await get_capability_map(ctx)
+    author_roles = {role.id for role in getattr(ctx.author, "roles", [])}
+
+    for cap in wanted:
+        role_ids = {int(x) for x in caps.get(cap, [])}
+        if author_roles.intersection(role_ids):
+            return True
+
+    return False
+
+
+async def member_is_core_admin(ctx) -> bool:
+    if await ctx.bot.is_owner(ctx.author):
+        return True
+
+    if not ctx.guild:
+        return False
+
+    if getattr(ctx.author.guild_permissions, "administrator", False):
+        return True
+
+    return await member_has_capability(ctx, "core_admin")
+
+
+async def require_capability(ctx, *capabilities: str, label: str | None = None) -> bool:
+    if await member_is_core_admin(ctx):
+        return True
+
+    if await member_has_capability(ctx, *capabilities):
+        return True
+
+    label = label or ", ".join(capabilities)
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        f"You need one of these capabilities: `{label}`.",
+    ))
+    return False
+
+
+# Override old broad group checks with least-privilege checks.
+
+async def is_admin(ctx) -> bool:
+    return await member_is_core_admin(ctx)
+
+
+async def is_management(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(ctx, "management_view")
+
+
+async def is_administration(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(
+        ctx,
+        "infrastructure_admin",
+        "security_admin",
+    )
+
+
+async def is_support(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(
+        ctx,
+        "general_support",
+        "support_lead",
+        "management_view",
+    )
+
+
+async def is_billing(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(
+        ctx,
+        "billing_support",
+        "finance_view",
+    )
+
+
+async def is_security(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(
+        ctx,
+        "security_support",
+        "security_admin",
+        "incident_response",
+        "audit_review",
+        "management_view",
+    )
+
+
+async def is_development(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(
+        ctx,
+        "development_read",
+        "backend_access",
+        "production_access",
+        "release_manager",
+        "qa_testing",
+        "infrastructure_admin",
+        "discord_systems",
+        "roblox_systems",
+        "automation_access",
+    )
+
+
+async def is_staff(ctx) -> bool:
+    return await member_is_core_admin(ctx) or await member_has_capability(
+        ctx,
+        "general_support",
+        "support_lead",
+        "billing_support",
+        "technical_support",
+        "security_support",
+        "moderation",
+        "incident_response",
+        "audit_review",
+        "development_read",
+        "backend_access",
+        "production_access",
+        "release_manager",
+        "qa_testing",
+        "design_access",
+        "management_view",
+        "finance_view",
+        "infrastructure_admin",
+        "security_admin",
+    )
+
+
+async def require_admin(ctx) -> bool:
+    return await require_capability(ctx, "core_admin", label="core_admin")
+
+
+async def require_management(ctx) -> bool:
+    return await require_capability(ctx, "management_view", label="management_view")
+
+
+async def require_administration(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "core_admin",
+        "infrastructure_admin",
+        "security_admin",
+        label="core_admin, infrastructure_admin, security_admin",
+    )
+
+
+async def require_staff(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "general_support",
+        "support_lead",
+        "billing_support",
+        "technical_support",
+        "security_support",
+        "moderation",
+        "incident_response",
+        "audit_review",
+        "development_read",
+        "backend_access",
+        "production_access",
+        "release_manager",
+        "qa_testing",
+        "design_access",
+        "management_view",
+        "finance_view",
+        "infrastructure_admin",
+        "security_admin",
+        label="any staff capability",
+    )
+
+
+async def require_support(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "general_support",
+        "support_lead",
+        "management_view",
+        label="general_support, support_lead, management_view",
+    )
+
+
+async def require_billing(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "billing_support",
+        "finance_view",
+        label="billing_support, finance_view",
+    )
+
+
+async def require_security(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "security_support",
+        "security_admin",
+        "incident_response",
+        "audit_review",
+        "management_view",
+        label="security_support, security_admin, incident_response, audit_review, management_view",
+    )
+
+
+async def require_development(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "development_read",
+        "backend_access",
+        "production_access",
+        "release_manager",
+        "qa_testing",
+        "infrastructure_admin",
+        "discord_systems",
+        "roblox_systems",
+        "automation_access",
+        label="development/production capability",
+    )
+
+
+async def require_release_manager(ctx) -> bool:
+    return await require_capability(ctx, "release_manager", label="release_manager")
+
+
+async def require_production(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "production_access",
+        "release_manager",
+        "infrastructure_admin",
+        label="production_access, release_manager, infrastructure_admin",
+    )
+
+
+async def require_technical_support(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "technical_support",
+        "support_lead",
+        label="technical_support, support_lead",
+    )
+
+
+async def require_general_support(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "general_support",
+        "support_lead",
+        label="general_support, support_lead",
+    )
+
+
+async def require_audit_review(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "audit_review",
+        "security_admin",
+        "management_view",
+        label="audit_review, security_admin, management_view",
+    )
+
+
+async def require_incident_response(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "incident_response",
+        "security_admin",
+        "production_access",
+        "management_view",
+        label="incident_response, security_admin, production_access, management_view",
+    )
+
