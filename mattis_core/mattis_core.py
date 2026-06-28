@@ -4198,6 +4198,249 @@ class MattisCore(commands.Cog):
             color=discord.Color.blue(),
         )
 
+
+    def access_model(self) -> list[dict]:
+        return [
+            {
+                "family": "core",
+                "name": "Core Config / Dangerous Settings",
+                "commands": "!mcore apiurl, token, routes, autoroute, logs, alerts, notify, eventlogs",
+                "allowed": "Founder/Admin, Administration Team, Discord Administrator",
+                "notes": "Controls routing, tokens, logs, alerts, and permissions. Keep locked down.",
+            },
+            {
+                "family": "management",
+                "name": "Management / Business Overview",
+                "commands": "management summaries, staff summaries, risk/customer overview",
+                "allowed": "Management, Administration Team, Founder/Admin",
+                "notes": "High-level business/customer visibility.",
+            },
+            {
+                "family": "support",
+                "name": "Support / CRM / Tickets",
+                "commands": "!msupport, !mcrm",
+                "allowed": "Support Team, Moderation & Support, Management, Administration Team",
+                "notes": "Customer and support workflow access.",
+            },
+            {
+                "family": "billing",
+                "name": "Billing",
+                "commands": "!mbilling",
+                "allowed": "Billing Support, Management, Administration Team",
+                "notes": "Invoices, failed billing, past due, trials.",
+            },
+            {
+                "family": "security",
+                "name": "Security / Audit",
+                "commands": "!msecurity, !maudit",
+                "allowed": "Security Admin, Security Support, Incident Response, Audit Reviewer, Senior Moderator, Management, Administration Team",
+                "notes": "Security risks, suspicious activity, audit events.",
+            },
+            {
+                "family": "development",
+                "name": "Development / Production",
+                "commands": "!mstatus, !mmodules, !mautomation, !mincident, !mdiscord, !mroblox",
+                "allowed": "Development Team, Administration Team, Management",
+                "notes": "Everything development/production related.",
+            },
+            {
+                "family": "staff",
+                "name": "General Staff / Workspace / Applications",
+                "commands": "!mworkspace, !mapps",
+                "allowed": "Support Team, Moderation & Support, Development Team, Management, Administration Team",
+                "notes": "General staff visibility.",
+            },
+        ]
+
+    def role_access_sections(self, guild: discord.Guild, role: discord.Role, sections: dict) -> list[str]:
+        found = []
+
+        for section, ids in sections.items():
+            if role.id in [int(x) for x in ids]:
+                found.append(section)
+
+        return found
+
+    def role_can_access_family(self, guild: discord.Guild, role: discord.Role, family: str, sections: dict) -> bool:
+        role_slug = self.route_slug(role.name)
+        section_slugs = [self.route_slug(x) for x in self.role_access_sections(guild, role, sections)]
+
+        is_founder = "founder" in role_slug or "owner" in role_slug
+        is_admin_role = role.permissions.administrator or "administrator" in role_slug or "admin" in role_slug
+        in_management = any("management" in x for x in section_slugs)
+        in_admin = any("administration" in x for x in section_slugs)
+        in_support = any("support" in x for x in section_slugs)
+        in_moderation = any("moderation" in x for x in section_slugs)
+        in_development = any("development" in x for x in section_slugs)
+
+        if is_founder or is_admin_role or in_admin:
+            return True
+
+        if family == "core":
+            return False
+
+        if family == "management":
+            return in_management
+
+        if family == "support":
+            return in_support or in_moderation or in_management
+
+        if family == "billing":
+            return "billing" in role_slug or in_management
+
+        if family == "security":
+            security_words = ["security", "incident", "audit", "seniormoderator", "moderator"]
+            return any(word in role_slug for word in security_words) or in_moderation or in_management
+
+        if family == "development":
+            return in_development or in_management
+
+        if family == "staff":
+            return in_support or in_moderation or in_development or in_management
+
+        return False
+
+    @mcore.group(name="access", invoke_without_command=True)
+    async def access(self, ctx):
+        """Audit Mattis Systems command access."""
+        if not await require_admin(ctx):
+            return
+
+        lines = []
+
+        for row in self.access_model():
+            lines.append(
+                f"**{row['name']}**\n"
+                f"Family: `{row['family']}`\n"
+                f"Commands: `{row['commands']}`\n"
+                f"Allowed: {row['allowed']}\n"
+                f"Notes: {row['notes']}\n"
+            )
+
+        await self.send_paginated(ctx, "Mattis Access Model", lines)
+
+    @access.command(name="matrix")
+    async def access_matrix(self, ctx):
+        """Show the command family access matrix."""
+        if not await require_admin(ctx):
+            return
+
+        sections = await self.saved_sections(ctx.guild)
+        role_rows = []
+
+        for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
+            if role == ctx.guild.default_role or role.managed:
+                continue
+
+            families = []
+
+            for row in self.access_model():
+                if self.role_can_access_family(ctx.guild, role, row["family"], sections):
+                    families.append(row["family"])
+
+            if families:
+                role_rows.append(f"{role.mention} → `{', '.join(families)}`")
+
+        await self.send_paginated(
+            ctx,
+            "Access Matrix",
+            role_rows,
+            empty="No access roles detected.",
+        )
+
+    @access.command(name="groups")
+    async def access_groups(self, ctx):
+        """Show saved role groups with expected access."""
+        if not await require_admin(ctx):
+            return
+
+        sections = await self.saved_sections(ctx.guild)
+        lines = []
+
+        for section, ids in sections.items():
+            section_slug = self.route_slug(section)
+
+            if "management" in section_slug:
+                access = "management, support, billing, security, development, staff"
+            elif "administration" in section_slug:
+                access = "core, management, support, billing, security, development, staff"
+            elif "moderation" in section_slug:
+                access = "support, security, staff"
+            elif "support" in section_slug:
+                access = "support, staff, plus billing/security by specialist role"
+            elif "development" in section_slug:
+                access = "development, staff"
+            else:
+                access = "no automatic command access unless role name matches specialist access"
+
+            lines.append(f"**{section}** — `{len(ids)}` roles\nAccess: `{access}`")
+
+        await self.send_paginated(ctx, "Role Group Access", lines)
+
+    @access.command(name="family")
+    async def access_family(self, ctx, family: str):
+        """Show who can access one command family."""
+        if not await require_admin(ctx):
+            return
+
+        family = self.route_slug(family)
+        valid = {row["family"]: row for row in self.access_model()}
+
+        if family not in valid:
+            await ctx.send(embed=error_embed(
+                "Unknown family",
+                f"Use one of: `{', '.join(valid.keys())}`"
+            ))
+            return
+
+        sections = await self.saved_sections(ctx.guild)
+        lines = [
+            f"Family: `{family}`",
+            f"Name: **{valid[family]['name']}**",
+            f"Commands: `{valid[family]['commands']}`",
+            "",
+            "**Roles with access:**",
+        ]
+
+        found = False
+
+        for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
+            if role == ctx.guild.default_role or role.managed:
+                continue
+
+            if self.role_can_access_family(ctx.guild, role, family, sections):
+                lines.append(f"• {role.mention}")
+                found = True
+
+        if not found:
+            lines.append("No roles detected.")
+
+        await self.send_paginated(ctx, f"Access Family: {family}", lines)
+
+    @access.command(name="check")
+    async def access_check(self, ctx, role: discord.Role):
+        """Check what a role can access."""
+        if not await require_admin(ctx):
+            return
+
+        sections = await self.saved_sections(ctx.guild)
+        in_sections = self.role_access_sections(ctx.guild, role, sections)
+
+        lines = [
+            f"Role: {role.mention}",
+            f"Position: `{role.position}`",
+            f"Discord Administrator: `{'yes' if role.permissions.administrator else 'no'}`",
+            f"Sections: `{', '.join(in_sections) if in_sections else 'none'}`",
+            "",
+            "**Access:**",
+        ]
+
+        for row in self.access_model():
+            allowed = self.role_can_access_family(ctx.guild, role, row["family"], sections)
+            lines.append(f"{'✅' if allowed else '❌'} `{row['family']}` — {row['name']}")
+
+        await self.send_paginated(ctx, "Role Access Check", lines)
+
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):
         """Check saved routes against current Discord channels."""
