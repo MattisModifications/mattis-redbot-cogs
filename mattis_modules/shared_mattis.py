@@ -28,6 +28,8 @@ async def get_core_config(bot) -> Config:
         role_groups={},
         role_sections={},
         route_backups=[],
+        alert_settings={},
+        alert_state={},
     )
     return cfg
 

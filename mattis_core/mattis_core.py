@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import re
 import time
+import json
+import hashlib
 import discord
 from redbot.core import commands
+from discord.ext import tasks
 
 from .shared_mattis import (
     embed,
@@ -66,6 +69,11 @@ class MattisCore(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        if not self.alert_loop.is_running():
+            self.alert_loop.start()
+
+    def cog_unload(self):
+        self.alert_loop.cancel()
 
     def build_pages(self, lines: list[str], *, empty: str = "Nothing found.", max_chars: int = 3200) -> list[str]:
         if not lines:
@@ -1762,6 +1770,529 @@ class MattisCore(commands.Cog):
             empty="No posts sent.",
             color=discord.Color.green(),
         )
+
+
+
+    def alert_rules(self) -> dict:
+        return {
+            "support_critical": {
+                "title": "Critical Support Tickets",
+                "path": "/bot/support/critical",
+                "purpose": "incident",
+            },
+            "support_unassigned": {
+                "title": "Unassigned Support Tickets",
+                "path": "/bot/support/unassigned",
+                "purpose": "support",
+            },
+            "billing_failed": {
+                "title": "Failed Billing Items",
+                "path": "/bot/billing/failed",
+                "purpose": "invoice",
+            },
+            "billing_pastdue": {
+                "title": "Past Due Billing",
+                "path": "/bot/billing/pastdue",
+                "purpose": "payment",
+            },
+            "audit_highrisk": {
+                "title": "High Risk Audit Events",
+                "path": "/bot/audit/highrisk",
+                "purpose": "audit_log",
+            },
+            "security_risks": {
+                "title": "Security Risks",
+                "path": "/bot/security/risks",
+                "purpose": "security",
+            },
+            "security_suspicious": {
+                "title": "Suspicious Security Activity",
+                "path": "/bot/security/suspicious",
+                "purpose": "security_log",
+            },
+            "automation_failed": {
+                "title": "Failed Automation",
+                "path": "/bot/automation/failed",
+                "purpose": "system_error",
+            },
+            "discord_broken": {
+                "title": "Broken Discord Integrations",
+                "path": "/bot/discord/broken",
+                "purpose": "bot_log",
+            },
+            "roblox_broken": {
+                "title": "Broken Roblox Integrations",
+                "path": "/bot/roblox/broken",
+                "purpose": "system_log",
+            },
+            "incidents": {
+                "title": "Incident Summary",
+                "path": "/bot/incidents/summary",
+                "purpose": "incident",
+            },
+        }
+
+    async def get_alert_settings(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        settings = await cfg.guild(guild).alert_settings()
+        settings = settings or {}
+
+        settings.setdefault("enabled", False)
+        settings.setdefault("cooldown_minutes", 30)
+        settings.setdefault("interval_minutes", 10)
+        settings.setdefault("rules_enabled", {})
+
+        return settings
+
+    async def save_alert_settings(self, guild: discord.Guild, settings: dict):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).alert_settings.set(settings)
+
+    async def get_alert_state(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        state = await cfg.guild(guild).alert_state()
+        state = state or {}
+        state.setdefault("rules", {})
+        return state
+
+    async def save_alert_state(self, guild: discord.Guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).alert_state.set(state)
+
+    def is_alert_rule_enabled(self, settings: dict, rule_key: str) -> bool:
+        rules_enabled = settings.get("rules_enabled", {}) or {}
+        return bool(rules_enabled.get(rule_key, True))
+
+    def payload_signature(self, payload) -> str:
+        try:
+            raw = json.dumps(payload, sort_keys=True, default=str)
+        except Exception:
+            raw = str(payload)
+
+        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def alert_issue_count(self, payload) -> int:
+        if payload is None:
+            return 0
+
+        if isinstance(payload, list):
+            return len(payload)
+
+        if not isinstance(payload, dict):
+            return 1 if payload else 0
+
+        if payload.get("ok") is False:
+            return 1
+
+        list_keys = [
+            "items",
+            "results",
+            "data",
+            "tickets",
+            "invoices",
+            "risks",
+            "events",
+            "sessions",
+            "workflows",
+            "runs",
+            "broken",
+            "failed",
+            "records",
+        ]
+
+        for key in list_keys:
+            value = payload.get(key)
+            if isinstance(value, list) and len(value) > 0:
+                return len(value)
+
+        numeric_keys = [
+            "count",
+            "total",
+            "failed",
+            "critical",
+            "unassigned",
+            "pastDue",
+            "past_due",
+            "highRisk",
+            "high_risk",
+            "broken",
+            "suspicious",
+            "risks",
+            "open",
+        ]
+
+        for key in numeric_keys:
+            value = payload.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+
+        counts = payload.get("counts")
+        if isinstance(counts, dict):
+            total = 0
+            for value in counts.values():
+                if isinstance(value, (int, float)) and value > 0:
+                    total += int(value)
+            return total
+
+        return 0
+
+    def build_alert_embed(self, rule_key: str, rule: dict, status: int, payload, issue_count: int, route_key: str):
+        colour = discord.Color.red() if issue_count > 0 or status >= 400 else discord.Color.green()
+        e = embed(rule["title"], color=colour)
+        e.add_field(name="Alert rule", value=f"`{rule_key}`", inline=True)
+        e.add_field(name="API", value=f"`HTTP {status}`", inline=True)
+        e.add_field(name="Issue count", value=f"`{issue_count}`", inline=True)
+        e.add_field(name="Endpoint", value=f"`{rule['path']}`", inline=False)
+        e.add_field(name="Route", value=f"`{route_key}`", inline=False)
+        e.add_field(name="Payload preview", value=fmt_payload(payload)[:1000], inline=False)
+        return e
+
+    async def run_one_alert_rule(self, guild: discord.Guild, rule_key: str, *, dry_run: bool = False, force: bool = False) -> dict:
+        settings = await self.get_alert_settings(guild)
+        state = await self.get_alert_state(guild)
+
+        if not self.is_alert_rule_enabled(settings, rule_key):
+            return {
+                "rule": rule_key,
+                "triggered": False,
+                "sent": False,
+                "status": "disabled",
+            }
+
+        rules = self.alert_rules()
+        rule = rules.get(rule_key)
+
+        if not rule:
+            return {
+                "rule": rule_key,
+                "triggered": False,
+                "sent": False,
+                "status": "unknown_rule",
+            }
+
+        status, payload = await request_json(self.bot, "GET", rule["path"])
+        issue_count = self.alert_issue_count(payload)
+
+        if status >= 400:
+            issue_count = max(issue_count, 1)
+
+        if issue_count <= 0:
+            return {
+                "rule": rule_key,
+                "triggered": False,
+                "sent": False,
+                "status": f"clear_http_{status}",
+            }
+
+        selected_key, channel, candidates = await self.resolve_dispatch_route(guild, rule["purpose"])
+
+        if not channel:
+            return {
+                "rule": rule_key,
+                "triggered": True,
+                "sent": False,
+                "status": "no_route",
+                "candidates": candidates,
+            }
+
+        now = int(time.time())
+        cooldown_seconds = int(settings.get("cooldown_minutes", 30)) * 60
+        signature = self.payload_signature(payload)
+
+        rule_state = state.setdefault("rules", {}).setdefault(rule_key, {})
+        last_sent = int(rule_state.get("last_sent", 0))
+        last_sig = rule_state.get("signature")
+
+        if not force and not dry_run:
+            if last_sig == signature and now - last_sent < cooldown_seconds:
+                return {
+                    "rule": rule_key,
+                    "triggered": True,
+                    "sent": False,
+                    "status": "cooldown_duplicate",
+                    "route": selected_key,
+                }
+
+            if now - last_sent < cooldown_seconds:
+                return {
+                    "rule": rule_key,
+                    "triggered": True,
+                    "sent": False,
+                    "status": "cooldown",
+                    "route": selected_key,
+                }
+
+        if dry_run:
+            return {
+                "rule": rule_key,
+                "triggered": True,
+                "sent": False,
+                "status": "dry_run",
+                "route": selected_key,
+                "issue_count": issue_count,
+            }
+
+        e = self.build_alert_embed(rule_key, rule, status, payload, issue_count, selected_key)
+        await channel.send(embed=e)
+
+        rule_state["last_sent"] = now
+        rule_state["signature"] = signature
+        rule_state["issue_count"] = issue_count
+        rule_state["route"] = selected_key
+
+        await self.save_alert_state(guild, state)
+
+        return {
+            "rule": rule_key,
+            "triggered": True,
+            "sent": True,
+            "status": "sent",
+            "route": selected_key,
+            "issue_count": issue_count,
+        }
+
+    async def run_alert_checks(self, guild: discord.Guild, *, dry_run: bool = False, force: bool = False) -> list[dict]:
+        results = []
+
+        for rule_key in self.alert_rules().keys():
+            try:
+                result = await self.run_one_alert_rule(guild, rule_key, dry_run=dry_run, force=force)
+            except Exception as exc:
+                result = {
+                    "rule": rule_key,
+                    "triggered": False,
+                    "sent": False,
+                    "status": f"error: {type(exc).__name__}: {exc}",
+                }
+
+            results.append(result)
+
+        return results
+
+    @tasks.loop(minutes=5)
+    async def alert_loop(self):
+        if not self.bot.is_ready():
+            return
+
+        for guild in list(self.bot.guilds):
+            settings = await self.get_alert_settings(guild)
+
+            if not settings.get("enabled", False):
+                continue
+
+            state = await self.get_alert_state(guild)
+            now = int(time.time())
+            interval_seconds = max(5, int(settings.get("interval_minutes", 10))) * 60
+            last_run = int(state.get("_last_run", 0))
+
+            if now - last_run < interval_seconds:
+                continue
+
+            state["_last_run"] = now
+            await self.save_alert_state(guild, state)
+
+            await self.run_alert_checks(guild, dry_run=False, force=False)
+
+    @mcore.group(name="alerts", invoke_without_command=True)
+    async def alerts(self, ctx):
+        """Automatic routed alerts. Disabled by default."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_alert_settings(ctx.guild)
+        state = await self.get_alert_state(ctx.guild)
+
+        e = embed("Mattis Alert Engine")
+        e.add_field(name="Enabled", value="✅ yes" if settings.get("enabled") else "❌ no", inline=True)
+        e.add_field(name="Interval", value=f"`{settings.get('interval_minutes', 10)} min`", inline=True)
+        e.add_field(name="Cooldown", value=f"`{settings.get('cooldown_minutes', 30)} min`", inline=True)
+        e.add_field(name="Rules", value=f"`{len(self.alert_rules())}`", inline=True)
+        e.add_field(name="Last run", value=f"<t:{int(state.get('_last_run', 0))}:R>" if state.get("_last_run") else "Never", inline=True)
+        e.add_field(
+            name="Commands",
+            value="`!mcore alerts list`\n`!mcore alerts preview`\n`!mcore alerts check`\n`!mcore alerts enable`\n`!mcore alerts disable`",
+            inline=False,
+        )
+
+        await ctx.send(embed=e)
+
+    @alerts.command(name="list")
+    async def alerts_list(self, ctx):
+        """List alert rules and their routes."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_alert_settings(ctx.guild)
+        lines = []
+
+        for rule_key, rule in self.alert_rules().items():
+            enabled = self.is_alert_rule_enabled(settings, rule_key)
+            selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, rule["purpose"])
+            lines.append(
+                f"{'✅' if enabled else '❌'} `{rule_key}` → purpose `{rule['purpose']}` → "
+                f"{channel.mention if channel else 'no usable route'}"
+            )
+
+        await self.send_paginated(ctx, "Alert Rules", lines)
+
+    @alerts.command(name="preview")
+    async def alerts_preview(self, ctx):
+        """Check alert rules without sending anything."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.run_alert_checks(ctx.guild, dry_run=True, force=True)
+        lines = []
+
+        for result in results:
+            marker = "⚠️" if result.get("triggered") else "✅"
+            lines.append(
+                f"{marker} `{result['rule']}` · `{result.get('status')}`"
+                + (f" · route `{result.get('route')}`" if result.get("route") else "")
+                + (f" · count `{result.get('issue_count')}`" if result.get("issue_count") is not None else "")
+            )
+
+        await self.send_paginated(ctx, "Alert Preview", lines)
+
+    @alerts.command(name="check")
+    async def alerts_check(self, ctx):
+        """Run alert checks now and send triggered alerts, respecting cooldown."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.run_alert_checks(ctx.guild, dry_run=False, force=False)
+        lines = []
+
+        for result in results:
+            if result.get("sent"):
+                marker = "📨"
+            elif result.get("triggered"):
+                marker = "⚠️"
+            else:
+                marker = "✅"
+
+            lines.append(
+                f"{marker} `{result['rule']}` · `{result.get('status')}`"
+                + (f" · route `{result.get('route')}`" if result.get("route") else "")
+            )
+
+        await self.send_paginated(ctx, "Alert Check Results", lines)
+
+    @alerts.command(name="force")
+    async def alerts_force(self, ctx):
+        """Force-send triggered alerts, bypassing cooldown."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.run_alert_checks(ctx.guild, dry_run=False, force=True)
+        lines = []
+
+        for result in results:
+            marker = "📨" if result.get("sent") else ("⚠️" if result.get("triggered") else "✅")
+            lines.append(
+                f"{marker} `{result['rule']}` · `{result.get('status')}`"
+                + (f" · route `{result.get('route')}`" if result.get("route") else "")
+            )
+
+        await self.send_paginated(ctx, "Forced Alert Results", lines)
+
+    @alerts.command(name="enable")
+    async def alerts_enable(self, ctx):
+        """Enable background alerts."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_alert_settings(ctx.guild)
+        settings["enabled"] = True
+        await self.save_alert_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed(
+            "Alerts enabled",
+            "Background alerts are now enabled. Use `!mcore alerts disable` to stop them."
+        ))
+
+    @alerts.command(name="disable")
+    async def alerts_disable(self, ctx):
+        """Disable background alerts."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_alert_settings(ctx.guild)
+        settings["enabled"] = False
+        await self.save_alert_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Alerts disabled", "Background alerts are now disabled."))
+
+    @alerts.command(name="cooldown")
+    async def alerts_cooldown(self, ctx, minutes: int):
+        """Set alert cooldown minutes."""
+        if not await require_admin(ctx):
+            return
+
+        minutes = max(5, min(int(minutes), 1440))
+        settings = await self.get_alert_settings(ctx.guild)
+        settings["cooldown_minutes"] = minutes
+        await self.save_alert_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Alert cooldown saved", f"Cooldown is now `{minutes}` minutes."))
+
+    @alerts.command(name="interval")
+    async def alerts_interval(self, ctx, minutes: int):
+        """Set background check interval minutes."""
+        if not await require_admin(ctx):
+            return
+
+        minutes = max(5, min(int(minutes), 1440))
+        settings = await self.get_alert_settings(ctx.guild)
+        settings["interval_minutes"] = minutes
+        await self.save_alert_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Alert interval saved", f"Background check interval is now `{minutes}` minutes."))
+
+    @alerts.command(name="ruleoff")
+    async def alerts_ruleoff(self, ctx, rule_key: str):
+        """Disable one alert rule."""
+        if not await require_admin(ctx):
+            return
+
+        rule_key = self.route_slug(rule_key)
+        if rule_key not in self.alert_rules():
+            await ctx.send(embed=error_embed("Unknown alert rule", f"`{rule_key}` is not a valid rule."))
+            return
+
+        settings = await self.get_alert_settings(ctx.guild)
+        rules_enabled = settings.setdefault("rules_enabled", {})
+        rules_enabled[rule_key] = False
+        await self.save_alert_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Alert rule disabled", f"`{rule_key}` disabled."))
+
+    @alerts.command(name="ruleon")
+    async def alerts_ruleon(self, ctx, rule_key: str):
+        """Enable one alert rule."""
+        if not await require_admin(ctx):
+            return
+
+        rule_key = self.route_slug(rule_key)
+        if rule_key not in self.alert_rules():
+            await ctx.send(embed=error_embed("Unknown alert rule", f"`{rule_key}` is not a valid rule."))
+            return
+
+        settings = await self.get_alert_settings(ctx.guild)
+        rules_enabled = settings.setdefault("rules_enabled", {})
+        rules_enabled[rule_key] = True
+        await self.save_alert_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Alert rule enabled", f"`{rule_key}` enabled."))
+
+    @alerts.command(name="reset")
+    async def alerts_reset(self, ctx):
+        """Clear alert cooldown/dedupe state."""
+        if not await require_admin(ctx):
+            return
+
+        await self.save_alert_state(ctx.guild, {"rules": {}})
+        await ctx.send(embed=ok_embed("Alert state reset", "Cooldown and duplicate state cleared."))
 
 
     @mcore.command(name="routecheck")
