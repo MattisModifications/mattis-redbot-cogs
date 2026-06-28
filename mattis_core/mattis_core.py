@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import discord
 from redbot.core import commands
 
@@ -231,6 +232,156 @@ class MattisCore(commands.Cog):
         suffix = f" · {', '.join(flags)}" if flags else ""
 
         return f"{role.mention} · pos `{role.position}`{suffix}"
+
+
+    def route_slug(self, value: str) -> str:
+        """Turn Discord category/channel names into safe route keys."""
+        text = str(value or "").lower()
+        text = re.sub(r"[^a-z0-9]+", "_", text)
+        text = "_".join(part for part in text.split("_") if part)
+        return text.strip("_") or "unnamed"
+
+    def exact_route_key(self, channel: discord.TextChannel) -> str:
+        category = channel.category.name if channel.category else "uncategorised"
+        category_slug = self.route_slug(category)
+        channel_slug = self.route_slug(channel.name)
+        return f"{category_slug}_{channel_slug}"
+
+    def route_aliases_for(self, category_slug: str, channel_slug: str, exact_key: str) -> list[str]:
+        """Optional short aliases. These are only saved if you apply with aliases."""
+        aliases: list[str] = []
+
+        def add(value: str):
+            value = self.route_slug(value)
+            if value and value != exact_key and value not in aliases:
+                aliases.append(value)
+
+        # Category-specific aliases.
+        if category_slug == "billing_support":
+            add(f"billing_{channel_slug}")
+            add(channel_slug)
+
+        if category_slug == "tech_support":
+            add(f"tech_{channel_slug}")
+            add(f"support_{channel_slug}")
+
+        if category_slug == "security_support":
+            add(f"security_{channel_slug}")
+            add(channel_slug)
+
+        if category_slug == "support_hub":
+            add(f"support_{channel_slug}")
+            add(channel_slug)
+
+        if category_slug == "development":
+            add(f"dev_{channel_slug}")
+            add(channel_slug)
+
+        if category_slug == "release_engine":
+            add(f"release_{channel_slug}")
+            add(channel_slug)
+
+        if category_slug == "observatory_logs":
+            add(channel_slug)
+            if channel_slug.endswith("_log"):
+                add(channel_slug[:-4])
+
+        if category_slug == "operations":
+            add(f"operations_{channel_slug}")
+            add(channel_slug)
+
+        if category_slug == "management":
+            add(f"management_{channel_slug}")
+
+        if category_slug == "company_hub":
+            add(channel_slug)
+
+        return aliases
+
+    def route_perms(self, channel: discord.TextChannel) -> tuple[bool, list[str]]:
+        perms = channel.permissions_for(channel.guild.me)
+        missing = []
+
+        if not perms.view_channel:
+            missing.append("View Channel")
+        if not perms.send_messages:
+            missing.append("Send Messages")
+        if not perms.embed_links:
+            missing.append("Embed Links")
+        if not perms.read_message_history:
+            missing.append("Read Message History")
+
+        return len(missing) == 0, missing
+
+    def route_meta(self, channel: discord.TextChannel) -> dict:
+        category = channel.category.name if channel.category else "Uncategorised"
+        category_slug = self.route_slug(category)
+        channel_slug = self.route_slug(channel.name)
+        exact_key = f"{category_slug}_{channel_slug}"
+        ok, missing = self.route_perms(channel)
+
+        return {
+            "key": exact_key,
+            "category": category,
+            "category_slug": category_slug,
+            "channel_slug": channel_slug,
+            "channel": channel,
+            "channel_id": channel.id,
+            "ok": ok,
+            "missing": missing,
+            "aliases": self.route_aliases_for(category_slug, channel_slug, exact_key),
+        }
+
+    def build_exact_routes(self, guild: discord.Guild) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+        routes: dict[str, dict] = {}
+        duplicates: dict[str, list[dict]] = {}
+
+        for channel in sorted(guild.text_channels, key=lambda c: (c.category.position if c.category else 999, c.position)):
+            meta = self.route_meta(channel)
+            key = meta["key"]
+
+            if key in routes:
+                duplicates.setdefault(key, [routes[key]])
+                duplicates[key].append(meta)
+                continue
+
+            routes[key] = meta
+
+        return routes, duplicates
+
+    def route_preview_line(self, meta: dict, *, show_aliases: bool = False) -> str:
+        channel = meta["channel"]
+        status = "✅ usable" if meta["ok"] else f"⚠️ missing {', '.join(meta['missing'])}"
+        base = f"`{meta['key']}` → {channel.mention} · `{meta['category']}`\\n{status}"
+
+        if show_aliases and meta["aliases"]:
+            base += f"\\nAliases: `{', '.join(meta['aliases'][:8])}`"
+
+        return base
+
+    async def backup_routes(self, guild: discord.Guild, reason: str):
+        cfg = await get_core_config(self.bot)
+        current = await cfg.guild(guild).systems_channels()
+        current = current or {}
+
+        backups = await cfg.guild(guild).route_backups()
+        backups = backups or []
+
+        backups.append({
+            "created_at": int(time.time()),
+            "reason": reason,
+            "routes": current,
+        })
+
+        # Keep the last 10 backups only.
+        backups = backups[-10:]
+
+        await cfg.guild(guild).route_backups.set(backups)
+
+    async def saved_routes(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        routes = await cfg.guild(guild).systems_channels()
+        return routes or {}
 
     async def saved_sections(self, guild: discord.Guild) -> dict[str, list[int]]:
         cfg = await get_core_config(self.bot)
@@ -617,6 +768,358 @@ class MattisCore(commands.Cog):
         e.add_field(name="Saved groups", value="\n".join(f"• {name} — {len(ids)} roles" for name, ids in sections.items()), inline=False)
 
         await ctx.send(embed=e)
+
+
+    @scan.command(name="routing", aliases=["routes"])
+    async def scan_routing(self, ctx, mode: str = "exact"):
+        """Preview automatic channel routing. Use: !mcore scan routing aliases"""
+        if not await require_admin(ctx):
+            return
+
+        mode = mode.lower().strip()
+        show_aliases = mode in ["alias", "aliases", "all", "full"]
+
+        routes, duplicates = self.build_exact_routes(ctx.guild)
+
+        lines = []
+        current_category = None
+
+        for key, meta in routes.items():
+            if meta["category"] != current_category:
+                current_category = meta["category"]
+                lines.append(f"\\n**{current_category}**")
+
+            lines.append(self.route_preview_line(meta, show_aliases=show_aliases))
+
+        if duplicates:
+            lines.append("\\n**Duplicate exact route keys detected**")
+            for key, metas in duplicates.items():
+                lines.append(f"`{key}` has `{len(metas)}` possible channels:")
+                for meta in metas:
+                    lines.append(f"• {meta['channel'].mention} · `{meta['category']}`")
+
+        await self.send_paginated(
+            ctx,
+            "Automatic Route Scan",
+            lines,
+            empty="No text channels found.",
+        )
+
+    @mcore.group(name="autoroute", invoke_without_command=True)
+    async def autoroute(self, ctx):
+        """Safe automatic route preview/apply tools."""
+        if not await require_admin(ctx):
+            return
+
+        await ctx.send(embed=embed(
+            "Safe Automatic Routing",
+            "This only reads Discord and saves channel IDs into bot config.\\n\\n"
+            "**Safe flow:**\\n"
+            "`!mcore autoroute preview`\\n"
+            "`!mcore autoroute apply`\\n\\n"
+            "**Optional:**\\n"
+            "`!mcore autoroute preview aliases`\\n"
+            "`!mcore autoroute apply aliases`\\n"
+            "`!mcore autoroute apply overwrite`\\n"
+            "`!mcore autoroute restore latest`"
+        ))
+
+    @autoroute.command(name="preview")
+    async def autoroute_preview(self, ctx, mode: str = "exact"):
+        """Preview routes without saving anything."""
+        if not await require_admin(ctx):
+            return
+
+        mode = mode.lower().strip()
+        show_aliases = mode in ["alias", "aliases", "all", "full"]
+
+        routes, duplicates = self.build_exact_routes(ctx.guild)
+        saved = await self.saved_routes(ctx.guild)
+
+        lines = [
+            f"Detected exact routes: `{len(routes)}`",
+            f"Already saved routes: `{len(saved)}`",
+            f"Aliases shown: `{'yes' if show_aliases else 'no'}`",
+            "",
+            "**Nothing has been saved yet.**",
+            "",
+        ]
+
+        current_category = None
+
+        for key, meta in routes.items():
+            if meta["category"] != current_category:
+                current_category = meta["category"]
+                lines.append(f"\\n**{current_category}**")
+
+            existing = saved.get(key)
+            saved_state = "new"
+
+            if existing == meta["channel_id"]:
+                saved_state = "already saved"
+            elif existing:
+                saved_state = "would conflict"
+
+            lines.append(f"{self.route_preview_line(meta, show_aliases=show_aliases)}\\nState: `{saved_state}`")
+
+        if duplicates:
+            lines.append("\\n**Duplicate exact route keys detected**")
+            for key, metas in duplicates.items():
+                lines.append(f"`{key}` has `{len(metas)}` possible channels:")
+                for meta in metas:
+                    lines.append(f"• {meta['channel'].mention} · `{meta['category']}`")
+
+        lines.append("\\n**Apply commands**")
+        lines.append("`!mcore autoroute apply` = save missing exact routes only")
+        lines.append("`!mcore autoroute apply overwrite` = replace existing exact routes")
+        lines.append("`!mcore autoroute apply aliases` = save exact routes plus shortcut aliases")
+
+        await self.send_paginated(
+            ctx,
+            "Auto-route Preview",
+            lines,
+            empty="No routes detected.",
+        )
+
+    @autoroute.command(name="apply")
+    async def autoroute_apply(self, ctx, *options: str):
+        """Save detected routes. Safe default: merge exact routes only."""
+        if not await require_admin(ctx):
+            return
+
+        opts = {self.route_slug(o) for o in options}
+        overwrite = "overwrite" in opts or "replace" in opts
+        include_aliases = "aliases" in opts or "alias" in opts
+        mode = "overwrite" if overwrite else "merge"
+
+        routes, duplicates = self.build_exact_routes(ctx.guild)
+
+        cfg = await get_core_config(self.bot)
+        channels = await cfg.guild(ctx.guild).systems_channels()
+        channels = channels or {}
+
+        await self.backup_routes(ctx.guild, f"before autoroute apply mode={mode} aliases={include_aliases}")
+
+        saved = []
+        skipped = []
+        conflicts = []
+
+        def save_key(key: str, channel_id: int, mention: str):
+            existing = channels.get(key)
+
+            if existing and existing != channel_id and not overwrite:
+                conflicts.append(f"`{key}` already points elsewhere, skipped. Use overwrite if correct.")
+                return
+
+            if existing == channel_id:
+                skipped.append(f"`{key}` already saved.")
+                return
+
+            channels[key] = channel_id
+            saved.append(f"`{key}` → {mention}")
+
+        for key, meta in routes.items():
+            save_key(key, meta["channel_id"], meta["channel"].mention)
+
+            if include_aliases:
+                for alias in meta["aliases"]:
+                    save_key(alias, meta["channel_id"], meta["channel"].mention)
+
+        await cfg.guild(ctx.guild).systems_channels.set(channels)
+
+        lines = [
+            f"Mode: `{mode}`",
+            f"Aliases saved: `{'yes' if include_aliases else 'no'}`",
+            f"Saved/updated: `{len(saved)}`",
+            f"Already existed/skipped: `{len(skipped)}`",
+            f"Conflicts skipped: `{len(conflicts)}`",
+            "",
+            "A backup was created before saving.",
+            "",
+        ]
+
+        if saved:
+            lines.append("**Saved routes**")
+            lines.extend(saved)
+
+        if conflicts:
+            lines.append("\\n**Conflicts skipped**")
+            lines.extend(conflicts)
+
+        if duplicates:
+            lines.append("\\n**Duplicate exact keys noticed**")
+            for key, metas in duplicates.items():
+                lines.append(f"`{key}` had `{len(metas)}` candidates. First route was used.")
+
+        await self.send_paginated(
+            ctx,
+            "Auto-route Applied",
+            lines,
+            empty="No route changes made.",
+            color=discord.Color.green(),
+        )
+
+    @autoroute.command(name="backups")
+    async def autoroute_backups(self, ctx):
+        """Show route backups."""
+        if not await require_admin(ctx):
+            return
+
+        cfg = await get_core_config(self.bot)
+        backups = await cfg.guild(ctx.guild).route_backups()
+        backups = backups or []
+
+        if not backups:
+            await ctx.send(embed=embed("Route Backups", "No route backups found."))
+            return
+
+        lines = []
+
+        for i, backup in enumerate(reversed(backups), start=1):
+            created = int(backup.get("created_at", 0))
+            reason = backup.get("reason", "No reason")
+            count = len(backup.get("routes", {}) or {})
+            lines.append(f"`{i}` · routes `{count}` · <t:{created}:R>\\n{reason}")
+
+        await self.send_paginated(ctx, "Route Backups", lines)
+
+    @autoroute.command(name="restore")
+    async def autoroute_restore(self, ctx, which: str = "latest"):
+        """Restore the latest route backup."""
+        if not await require_admin(ctx):
+            return
+
+        if which.lower().strip() != "latest":
+            await ctx.send(embed=error_embed("Unsupported restore", "Use `!mcore autoroute restore latest`."))
+            return
+
+        cfg = await get_core_config(self.bot)
+        backups = await cfg.guild(ctx.guild).route_backups()
+        backups = backups or []
+
+        if not backups:
+            await ctx.send(embed=error_embed("No backups", "No route backups found."))
+            return
+
+        latest = backups[-1]
+        routes = latest.get("routes", {}) or {}
+
+        await self.backup_routes(ctx.guild, "before restoring latest backup")
+        await cfg.guild(ctx.guild).systems_channels.set(routes)
+
+        await ctx.send(embed=ok_embed(
+            "Routes restored",
+            f"Restored latest backup with `{len(routes)}` routes."
+        ))
+
+    @mcore.command(name="routes")
+    async def routes(self, ctx, *, query: str = ""):
+        """Show saved routes. Optional: !mcore routes billing"""
+        if not await require_admin(ctx):
+            return
+
+        routes = await self.saved_routes(ctx.guild)
+        query_slug = self.route_slug(query) if query else ""
+
+        lines = []
+
+        for key in sorted(routes.keys()):
+            if query_slug and query_slug not in self.route_slug(key):
+                continue
+
+            cid = routes[key]
+            ch = ctx.guild.get_channel(cid)
+            lines.append(f"`{key}` → {ch.mention if ch else f'missing:{cid}'}")
+
+        await self.send_paginated(
+            ctx,
+            "Saved Channel Routes",
+            lines,
+            empty="No saved routes matched.",
+        )
+
+    @mcore.command(name="route")
+    async def route(self, ctx, key: str, channel: discord.TextChannel):
+        """Manually save one route. Example: !mcore route billing_invoices #invoices"""
+        if not await require_admin(ctx):
+            return
+
+        key = self.route_slug(key)
+
+        cfg = await get_core_config(self.bot)
+        channels = await cfg.guild(ctx.guild).systems_channels()
+        channels = channels or {}
+
+        await self.backup_routes(ctx.guild, f"before manual route {key}")
+        channels[key] = channel.id
+
+        await cfg.guild(ctx.guild).systems_channels.set(channels)
+
+        await ctx.send(embed=ok_embed("Route saved", f"`{key}` → {channel.mention}"))
+
+    @mcore.command(name="unroute")
+    async def unroute(self, ctx, key: str):
+        """Remove one saved route key."""
+        if not await require_admin(ctx):
+            return
+
+        key = self.route_slug(key)
+
+        cfg = await get_core_config(self.bot)
+        channels = await cfg.guild(ctx.guild).systems_channels()
+        channels = channels or {}
+
+        if key not in channels:
+            await ctx.send(embed=error_embed("Route not found", f"`{key}` is not saved."))
+            return
+
+        await self.backup_routes(ctx.guild, f"before unroute {key}")
+        channels.pop(key, None)
+        await cfg.guild(ctx.guild).systems_channels.set(channels)
+
+        await ctx.send(embed=ok_embed("Route removed", f"`{key}` removed."))
+
+    @mcore.command(name="routecheck")
+    async def routecheck(self, ctx):
+        """Check saved routes against current Discord channels."""
+        if not await require_admin(ctx):
+            return
+
+        saved = await self.saved_routes(ctx.guild)
+        live_routes, _ = self.build_exact_routes(ctx.guild)
+
+        lines = []
+
+        missing_channels = 0
+        exact_missing = 0
+
+        for key in sorted(saved.keys()):
+            cid = saved[key]
+            channel = ctx.guild.get_channel(cid)
+
+            if not channel:
+                missing_channels += 1
+                lines.append(f"❌ `{key}` → missing channel `{cid}`")
+                continue
+
+            if key not in live_routes:
+                exact_missing += 1
+                lines.append(f"ℹ️ `{key}` → {channel.mention} saved, but not an exact category route key")
+
+        lines.insert(0, f"Saved routes: `{len(saved)}`")
+        lines.insert(1, f"Missing channels: `{missing_channels}`")
+        lines.insert(2, f"Non-exact/custom keys: `{exact_missing}`")
+        lines.insert(3, "")
+
+        if len(lines) == 4:
+            lines.append("✅ Saved routes look healthy.")
+
+        await self.send_paginated(
+            ctx,
+            "Route Check",
+            lines,
+            empty="No saved routes found.",
+        )
 
     @mcore.command(name="suggest")
     async def suggest(self, ctx):

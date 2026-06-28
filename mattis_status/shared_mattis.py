@@ -27,6 +27,7 @@ async def get_core_config(bot) -> Config:
         admin_roles=[],
         role_groups={},
         role_sections={},
+        route_backups=[],
     )
     return cfg
 
