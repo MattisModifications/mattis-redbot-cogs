@@ -1936,6 +1936,169 @@ class MattisCore(commands.Cog):
 
         return 0
 
+
+    def count_value(self, value) -> int:
+        if value is None:
+            return 0
+
+        if isinstance(value, list):
+            return len(value)
+
+        if isinstance(value, dict):
+            if "items" in value and isinstance(value["items"], list):
+                return len(value["items"])
+            if "results" in value and isinstance(value["results"], list):
+                return len(value["results"])
+            return 0
+
+        if isinstance(value, bool):
+            return 1 if value else 0
+
+        if isinstance(value, (int, float)):
+            return int(value) if value > 0 else 0
+
+        return 0
+
+    def first_count(self, payload, keys: list[str]) -> int:
+        if not isinstance(payload, dict):
+            return self.count_value(payload)
+
+        places = [payload]
+
+        counts = payload.get("counts")
+        if isinstance(counts, dict):
+            places.append(counts)
+
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            places.append(summary)
+
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            places.append(meta)
+
+        for place in places:
+            for key in keys:
+                if key in place:
+                    count = self.count_value(place.get(key))
+                    if count > 0:
+                        return count
+
+        for key in ["items", "results", "data", "records"]:
+            if key in payload:
+                count = self.count_value(payload.get(key))
+                if count > 0:
+                    return count
+
+        return 0
+
+    def alert_issue_count_for_rule(self, rule_key: str, payload, status: int) -> int:
+        if status >= 400:
+            return 1
+
+        rule_key = self.route_slug(rule_key)
+
+        rule_keys = {
+            "support_critical": [
+                "critical",
+                "criticalTickets",
+                "critical_tickets",
+                "urgent",
+                "priority",
+                "items",
+                "tickets",
+            ],
+            "support_unassigned": [
+                "unassigned",
+                "unassignedTickets",
+                "unassigned_tickets",
+                "items",
+                "tickets",
+            ],
+            "billing_failed": [
+                "failed",
+                "failedInvoices",
+                "failed_invoices",
+                "failedPayments",
+                "failed_payments",
+                "items",
+                "invoices",
+            ],
+            "billing_pastdue": [
+                "pastDue",
+                "past_due",
+                "pastdue",
+                "overdue",
+                "items",
+                "invoices",
+            ],
+            "audit_highrisk": [
+                "highRisk",
+                "high_risk",
+                "highRiskEvents",
+                "high_risk_events",
+                "events",
+                "items",
+            ],
+            "security_risks": [
+                "risks",
+                "criticalRisks",
+                "critical_risks",
+                "highRisk",
+                "high_risk",
+                "items",
+            ],
+            "security_suspicious": [
+                "suspicious",
+                "suspiciousActivity",
+                "suspicious_activity",
+                "items",
+                "sessions",
+            ],
+            "automation_failed": [
+                "failed",
+                "failedRuns",
+                "failed_runs",
+                "runs",
+                "items",
+            ],
+            "discord_broken": [
+                "broken",
+                "brokenRoutes",
+                "broken_routes",
+                "brokenMappings",
+                "broken_mappings",
+                "items",
+            ],
+            "roblox_broken": [
+                "broken",
+                "brokenPolicies",
+                "broken_policies",
+                "drift",
+                "items",
+            ],
+            "incidents": [
+                "active",
+                "activeIncidents",
+                "active_incidents",
+                "open",
+                "openIncidents",
+                "open_incidents",
+                "critical",
+                "major",
+                "unresolved",
+                "ongoing",
+                "items",
+            ],
+        }
+
+        keys = rule_keys.get(rule_key)
+
+        if keys:
+            return self.first_count(payload, keys)
+
+        return self.alert_issue_count(payload)
+
     def build_alert_embed(self, rule_key: str, rule: dict, status: int, payload, issue_count: int, route_key: str):
         colour = discord.Color.red() if issue_count > 0 or status >= 400 else discord.Color.green()
         e = embed(rule["title"], color=colour)
@@ -1971,7 +2134,7 @@ class MattisCore(commands.Cog):
             }
 
         status, payload = await request_json(self.bot, "GET", rule["path"])
-        issue_count = self.alert_issue_count(payload)
+        issue_count = self.alert_issue_count_for_rule(rule_key, payload, status)
 
         if status >= 400:
             issue_count = max(issue_count, 1)
