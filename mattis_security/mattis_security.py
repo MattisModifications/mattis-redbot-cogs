@@ -68,10 +68,7 @@ class MattisSecurity(commands.Cog):
         status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={q(query)}")
         await ctx.send(embed=embed(f"Security User Lookup: {query}", line_list(payload.get("users", []), user_line, empty="No users found.")))
 
-    @msecurity.command(name="failedlogins")
-    @msecurity.command(name="permissions")
-    @msecurity.command(name="tokens")
-    @msecurity.command(name="config")
+    @msecurity.command(name="failedlogins", aliases=["permissions", "tokens", "config"])
     async def placeholder(self, ctx):
         if not await require_admin(ctx):
             return

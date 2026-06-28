@@ -40,10 +40,7 @@ class MattisDiscord(commands.Cog):
         status, payload = await request_json(self.bot, "GET", "/bot/discord/broken")
         await ctx.send(embed=embed("Discord Missing Config", line_list(payload.get("missingDiscordGuild", []), workspace_line, empty="No missing Discord guild IDs.")))
 
-    @mdiscord.command(name="workspace")
-    @mdiscord.command(name="routes")
-    @mdiscord.command(name="mappings")
-    @mdiscord.command(name="syncstatus")
+    @mdiscord.command(name="workspace", aliases=["routes", "mappings", "syncstatus"])
     async def workspace(self, ctx, *, workspace: str):
         if not await require_staff(ctx):
             return

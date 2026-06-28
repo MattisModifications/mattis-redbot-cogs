@@ -48,8 +48,7 @@ class MattisWorkspace(commands.Cog):
         else:
             await self.list(ctx)
 
-    @mworkspace.command(name="config")
-    @mworkspace.command(name="health")
+    @mworkspace.command(name="config", aliases=["health"])
     async def config(self, ctx, *, workspace: str = ""):
         if not await require_staff(ctx):
             return
@@ -66,8 +65,7 @@ class MattisWorkspace(commands.Cog):
 
         await ctx.send(embed=e)
 
-    @mworkspace.command(name="integrations")
-    @mworkspace.command(name="modules")
+    @mworkspace.command(name="integrations", aliases=["modules"])
     async def integrations(self, ctx, *, workspace: str):
         if not await require_staff(ctx):
             return

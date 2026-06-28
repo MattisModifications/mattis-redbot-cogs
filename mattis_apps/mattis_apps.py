@@ -15,9 +15,7 @@ class MattisApplications(commands.Cog):
             return
         await self.summary(ctx)
 
-    @mapps.command(name="summary")
-    @mapps.command(name="forms")
-    @mapps.command(name="stats")
+    @mapps.command(name="summary", aliases=["forms", "stats"])
     async def summary(self, ctx):
         if not await require_staff(ctx):
             return
@@ -25,9 +23,7 @@ class MattisApplications(commands.Cog):
         status, payload = await request_json(self.bot, "GET", "/bot/applications/summary")
         await ctx.send(embed=simple_counts_embed("Applications Summary", payload if status == 200 else {}))
 
-    @mapps.command(name="recent")
-    @mapps.command(name="pending")
-    @mapps.command(name="submissions")
+    @mapps.command(name="recent", aliases=["pending", "submissions"])
     async def recent(self, ctx):
         if not await require_staff(ctx):
             return

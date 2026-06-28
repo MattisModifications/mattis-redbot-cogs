@@ -15,14 +15,7 @@ class MattisIncidents(commands.Cog):
             return
         await self.summary(ctx)
 
-    @mincident.command(name="summary")
-    @mincident.command(name="current")
-    @mincident.command(name="recent")
-    @mincident.command(name="errors")
-    @mincident.command(name="uptime")
-    @mincident.command(name="latency")
-    @mincident.command(name="ssl")
-    @mincident.command(name="domains")
+    @mincident.command(name="summary", aliases=["current", "recent", "errors", "uptime", "latency", "ssl", "domains"])
     async def summary(self, ctx):
         if not await require_staff(ctx):
             return

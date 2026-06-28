@@ -15,9 +15,7 @@ class MattisModules(commands.Cog):
             return
         await self.summary(ctx)
 
-    @mmodules.command(name="summary")
-    @mmodules.command(name="catalog")
-    @mmodules.command(name="usage")
+    @mmodules.command(name="summary", aliases=["catalog", "usage"])
     async def summary(self, ctx):
         if not await require_staff(ctx):
             return
@@ -25,8 +23,7 @@ class MattisModules(commands.Cog):
         status, payload = await request_json(self.bot, "GET", "/bot/modules/summary")
         await ctx.send(embed=simple_counts_embed("Modules Summary", payload if status == 200 else {}))
 
-    @mmodules.command(name="flags")
-    @mmodules.command(name="developer")
+    @mmodules.command(name="flags", aliases=["developer"])
     async def admin(self, ctx):
         if not await require_admin(ctx):
             return

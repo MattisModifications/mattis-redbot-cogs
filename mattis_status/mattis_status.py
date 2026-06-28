@@ -83,10 +83,7 @@ class MattisStatus(commands.Cog):
         except Exception as exc:
             await ctx.send(embed=embed("Website Health", f"{type(exc).__name__}: {exc}", color=discord.Color.red()))
 
-    @mstatus.command(name="database")
-    @mstatus.command(name="redis")
-    @mstatus.command(name="workers")
-    @mstatus.command(name="pm2")
+    @mstatus.command(name="database", aliases=["redis", "workers", "pm2"])
     async def admin_snapshot(self, ctx):
         if not await require_admin(ctx):
             return

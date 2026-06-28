@@ -51,11 +51,7 @@ class MattisAudit(commands.Cog):
         status, payload = await request_json(self.bot, "GET", f"/bot/audit/search?q={q(query)}")
         await ctx.send(embed=embed(f"Audit Search: {query}", line_list(payload.get("events", []), audit_line, empty="No matching events.")))
 
-    @maudit.command(name="billing")
-    @maudit.command(name="support")
-    @maudit.command(name="security")
-    @maudit.command(name="roblox")
-    @maudit.command(name="discord")
+    @maudit.command(name="billing", aliases=["support", "security", "roblox", "discord"])
     async def filtered(self, ctx):
         if not await require_admin(ctx):
             return

@@ -40,13 +40,7 @@ class MattisRoblox(commands.Cog):
         status, payload = await request_json(self.bot, "GET", "/bot/roblox/broken")
         await ctx.send(embed=embed("Roblox Missing Config", line_list(payload.get("missingRobloxGroup", []), workspace_line, empty="No missing Roblox group IDs.")))
 
-    @mroblox.command(name="workspace")
-    @mroblox.command(name="group")
-    @mroblox.command(name="ranks")
-    @mroblox.command(name="policies")
-    @mroblox.command(name="telemetry")
-    @mroblox.command(name="keys")
-    @mroblox.command(name="syncstatus")
+    @mroblox.command(name="workspace", aliases=["group", "ranks", "policies", "telemetry", "keys", "syncstatus"])
     async def workspace(self, ctx, *, workspace: str):
         if not await require_staff(ctx):
             return

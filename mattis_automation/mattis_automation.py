@@ -15,10 +15,7 @@ class MattisAutomation(commands.Cog):
             return
         await self.summary(ctx)
 
-    @mautomation.command(name="summary")
-    @mautomation.command(name="workflows")
-    @mautomation.command(name="workers")
-    @mautomation.command(name="datatransfers")
+    @mautomation.command(name="summary", aliases=["workflows", "workers", "datatransfers"])
     async def summary(self, ctx):
         if not await require_staff(ctx):
             return
@@ -26,8 +23,7 @@ class MattisAutomation(commands.Cog):
         status, payload = await request_json(self.bot, "GET", "/bot/automation/summary")
         await ctx.send(embed=simple_counts_embed("Automation Summary", payload if status == 200 else {}))
 
-    @mautomation.command(name="failed")
-    @mautomation.command(name="recent")
+    @mautomation.command(name="failed", aliases=["recent"])
     async def failed(self, ctx):
         if not await require_staff(ctx):
             return
