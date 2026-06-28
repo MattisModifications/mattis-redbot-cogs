@@ -521,14 +521,18 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Channel Scan", lines, empty="No text channels found.")
     @scan.command(name="permissions")
-    async def scan_permissions(self, ctx):
-        """Find every channel where the bot cannot properly send embeds."""
+    async def scan_permissions(self, ctx, mode: str = "issues"):
+        """Scan channel permissions. Use: !mcore scan permissions all"""
         if not await require_admin(ctx):
             return
 
-        issues = []
+        mode = mode.lower().strip()
+        show_all = mode in ["all", "full", "everything", "list"]
 
-        for channel in ctx.guild.text_channels:
+        issue_lines = []
+        all_lines = []
+
+        for channel in sorted(ctx.guild.text_channels, key=lambda c: (c.category.position if c.category else 999, c.position)):
             perms = channel.permissions_for(ctx.guild.me)
             missing = []
 
@@ -541,21 +545,40 @@ class MattisCore(commands.Cog):
             if not perms.read_message_history:
                 missing.append("Read Message History")
 
-            if missing:
-                category = channel.category.name if channel.category else "No category"
-                issues.append(f"{channel.mention} · `{category}`\nMissing: {', '.join(missing)}")
+            category = channel.category.name if channel.category else "No category"
+            status = "✅ OK" if not missing else f"⚠️ Missing: {', '.join(missing)}"
 
-        if not issues:
-            await ctx.send(embed=ok_embed("Permission Scan", "No obvious channel permission issues found."))
+            line = f"{channel.mention} · `{category}`\\n{self.bot_perm_line(channel)}\\n{status}"
+
+            all_lines.append(line)
+
+            if missing:
+                issue_lines.append(line)
+
+        if show_all:
+            await self.send_paginated(
+                ctx,
+                "Full Permission Scan",
+                all_lines,
+                empty="No text channels found.",
+            )
+            return
+
+        if not issue_lines:
+            await ctx.send(embed=ok_embed(
+                "Permission Scan",
+                "No obvious channel permission issues found.\\n\\nUse `!mcore scan permissions all` to view every channel.",
+            ))
             return
 
         await self.send_paginated(
             ctx,
             "Permission Issues",
-            issues,
+            issue_lines,
             empty="No permission issues found.",
             color=discord.Color.gold(),
         )
+
     @mcore.group(name="importgroups", invoke_without_command=True)
     async def importgroups(self, ctx):
         """Preview/apply dashed role group import."""
