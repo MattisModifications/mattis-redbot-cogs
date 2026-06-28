@@ -831,3 +831,62 @@ async def require_incident_response(ctx) -> bool:
         label="incident_response, security_admin, production_access, management_view",
     )
 
+
+
+# Corrected capability defaults/matcher.
+CAPABILITY_DEFAULTS = {
+    "core_admin": ["founder", "administrator"],
+
+    "management_view": ["founder", "director", "executive"],
+    "finance_view": ["director", "executive"],
+
+    "general_support": ["support_agent", "support_lead"],
+    "support_lead": ["support_lead"],
+    "billing_support": ["billing_support"],
+    "technical_support": ["technical_support"],
+    "security_support": ["security_support"],
+
+    "moderation": ["moderator", "senior_moderator"],
+    "incident_response": ["incident_response"],
+    "audit_review": ["audit_reviewer"],
+
+    "security_admin": ["security_admin"],
+    "infrastructure_admin": ["infrastructure_admin"],
+
+    "development_read": ["developer", "lead_developer", "qa_tester", "release_manager"],
+    "backend_access": ["developer", "lead_developer"],
+    "production_access": ["lead_developer", "infrastructure_admin"],
+    "release_manager": ["release_manager"],
+    "qa_testing": ["qa_tester"],
+    "design_access": ["designer"],
+
+    "discord_systems": ["developer", "lead_developer", "infrastructure_admin"],
+    "roblox_systems": ["developer", "lead_developer", "infrastructure_admin"],
+    "automation_access": ["lead_developer", "infrastructure_admin"],
+}
+
+
+def capability_match_role_name(role_name: str, keyword: str) -> bool:
+    role_slug = norm(role_name).replace("_", "")
+    key_slug = norm(keyword).replace("_", "")
+    return key_slug in role_slug
+
+
+def default_capabilities_for_guild(guild: discord.Guild) -> dict[str, list[int]]:
+    caps: dict[str, list[int]] = {key: [] for key in CAPABILITY_DEFAULTS.keys()}
+
+    if not guild:
+        return caps
+
+    for role in guild.roles:
+        if role == guild.default_role or role.managed:
+            continue
+
+        for capability, keywords in CAPABILITY_DEFAULTS.items():
+            for keyword in keywords:
+                if capability_match_role_name(role.name, keyword):
+                    if role.id not in caps[capability]:
+                        caps[capability].append(role.id)
+
+    return caps
+

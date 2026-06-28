@@ -4445,33 +4445,43 @@ class MattisCore(commands.Cog):
     def capability_defaults(self) -> dict:
         return {
             "core_admin": ["founder", "administrator"],
+
             "management_view": ["founder", "director", "executive"],
             "finance_view": ["director", "executive"],
 
-            "general_support": ["supportagent", "supportlead"],
-            "support_lead": ["supportlead"],
-            "billing_support": ["billingsupport"],
-            "technical_support": ["technicalsupport"],
-            "security_support": ["securitysupport"],
+            "general_support": ["support_agent", "support_lead"],
+            "support_lead": ["support_lead"],
+            "billing_support": ["billing_support"],
+            "technical_support": ["technical_support"],
+            "security_support": ["security_support"],
 
-            "moderation": ["moderator", "seniormoderator"],
-            "incident_response": ["incidentresponse"],
-            "audit_review": ["auditreviewer"],
+            "moderation": ["moderator", "senior_moderator"],
+            "incident_response": ["incident_response"],
+            "audit_review": ["audit_reviewer"],
 
-            "security_admin": ["securityadmin"],
-            "infrastructure_admin": ["infrastructureadmin"],
+            "security_admin": ["security_admin"],
+            "infrastructure_admin": ["infrastructure_admin"],
 
-            "development_read": ["developer", "leaddeveloper", "qatester", "releasemanager"],
-            "backend_access": ["developer", "leaddeveloper"],
-            "production_access": ["leaddeveloper", "infrastructureadmin"],
-            "release_manager": ["releasemanager"],
-            "qa_testing": ["qatester"],
+            "development_read": ["developer", "lead_developer", "qa_tester", "release_manager"],
+            "backend_access": ["developer", "lead_developer"],
+            "production_access": ["lead_developer", "infrastructure_admin"],
+            "release_manager": ["release_manager"],
+            "qa_testing": ["qa_tester"],
             "design_access": ["designer"],
 
-            "discord_systems": ["developer", "leaddeveloper", "infrastructureadmin"],
-            "roblox_systems": ["developer", "leaddeveloper", "infrastructureadmin"],
-            "automation_access": ["leaddeveloper", "infrastructureadmin"],
+            "discord_systems": ["developer", "lead_developer", "infrastructure_admin"],
+            "roblox_systems": ["developer", "lead_developer", "infrastructure_admin"],
+            "automation_access": ["lead_developer", "infrastructure_admin"],
         }
+
+    def capability_keyword_match(self, role_name: str, keyword: str) -> bool:
+        role_slug = self.route_slug(role_name)
+        key_slug = self.route_slug(keyword)
+
+        role_compact = role_slug.replace("_", "")
+        key_compact = key_slug.replace("_", "")
+
+        return key_slug in role_slug or key_compact in role_compact
 
     def build_default_capabilities(self, guild: discord.Guild) -> dict[str, list[int]]:
         caps = {key: [] for key in self.capability_defaults().keys()}
@@ -4480,12 +4490,11 @@ class MattisCore(commands.Cog):
             if role == guild.default_role or role.managed:
                 continue
 
-            role_slug = self.route_slug(role.name)
-
             for cap, keywords in self.capability_defaults().items():
                 for keyword in keywords:
-                    if keyword in role_slug and role.id not in caps[cap]:
-                        caps[cap].append(role.id)
+                    if self.capability_keyword_match(role.name, keyword):
+                        if role.id not in caps[cap]:
+                            caps[cap].append(role.id)
 
         return caps
 
