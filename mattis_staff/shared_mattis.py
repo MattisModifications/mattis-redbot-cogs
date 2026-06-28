@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Optional
 from urllib.parse import quote
@@ -47,6 +48,13 @@ def ok_embed(title: str, message: str | None = None) -> discord.Embed:
     return embed(title, message, color=OK)
 
 
+def pretty_key(value: Any) -> str:
+    text = str(value)
+    text = re.sub(r"(?<!^)(?=[A-Z])", " ", text)
+    text = text.replace("_", " ").replace("-", " ")
+    return " ".join(part.capitalize() for part in text.split())
+
+
 def add_fields(e: discord.Embed, data: dict[str, Any], *, inline: bool = True, max_fields: int = 20) -> discord.Embed:
     added = 0
     for key, value in data.items():
@@ -59,7 +67,7 @@ def add_fields(e: discord.Embed, data: dict[str, Any], *, inline: bool = True, m
             value = ", ".join(map(str, value[:8])) if value else "—"
 
         e.add_field(
-            name=str(key).replace("_", " ").title(),
+            name=pretty_key(key),
             value=trim(value, 1024),
             inline=inline,
         )

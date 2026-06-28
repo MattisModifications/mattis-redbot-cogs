@@ -24,7 +24,7 @@ class MattisStatus(commands.Cog):
 
     @commands.group(name="mstatus", invoke_without_command=True)
     async def mstatus(self, ctx):
-        """Mattis CMS health summary."""
+        """Mattis CMS | Systems health summary."""
         if not await require_staff(ctx):
             return
         await self.overview(ctx)
@@ -74,10 +74,12 @@ class MattisStatus(commands.Cog):
             async with aiohttp.ClientSession() as session:
                 async with session.get(web_url, timeout=10) as resp:
                     latency = round((time.perf_counter() - started) * 1000)
+
                     e = embed("Website Health")
                     e.add_field(name="Status", value=f"HTTP {resp.status}", inline=True)
                     e.add_field(name="Latency", value=f"{latency}ms", inline=True)
                     e.add_field(name="URL", value=web_url, inline=False)
+
                     await ctx.send(embed=e)
 
         except Exception as exc:
@@ -93,10 +95,8 @@ class MattisStatus(commands.Cog):
 
     @commands.command(name="muptime")
     async def muptime(self, ctx):
-        """Alias for Mattis status."""
         await self.overview(ctx)
 
     @commands.command(name="mhealth")
     async def mhealth(self, ctx):
-        """Alias for Mattis status."""
         await self.overview(ctx)
