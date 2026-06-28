@@ -1079,6 +1079,143 @@ class MattisCore(commands.Cog):
 
         await ctx.send(embed=ok_embed("Route removed", f"`{key}` removed."))
 
+
+    @mcore.command(name="routeinfo")
+    async def routeinfo(self, ctx, *, key: str):
+        """Show where a saved route points."""
+        if not await require_admin(ctx):
+            return
+
+        clean_key = self.route_slug(key)
+        routes = await self.saved_routes(ctx.guild)
+        channel_id = routes.get(clean_key)
+
+        if not channel_id:
+            await ctx.send(embed=error_embed(
+                "Route not found",
+                f"`{clean_key}` is not saved.\n\nTry `!mcore routes {clean_key}` or `!mcore routes`."
+            ))
+            return
+
+        channel = ctx.guild.get_channel(channel_id)
+
+        if not channel:
+            await ctx.send(embed=error_embed(
+                "Route channel missing",
+                f"`{clean_key}` points to missing channel ID `{channel_id}`."
+            ))
+            return
+
+        category = channel.category.name if channel.category else "No category"
+        exact_key = self.exact_route_key(channel) if isinstance(channel, discord.TextChannel) else "not_text_channel"
+        is_exact = clean_key == exact_key
+
+        ok, missing = self.route_perms(channel) if isinstance(channel, discord.TextChannel) else (False, ["Not a text channel"])
+
+        e = embed("Route Info")
+        e.add_field(name="Route key", value=f"`{clean_key}`", inline=False)
+        e.add_field(name="Channel", value=channel.mention, inline=True)
+        e.add_field(name="Category", value=f"`{category}`", inline=True)
+        e.add_field(name="Exact category route", value="✅ yes" if is_exact else f"ℹ️ no\nExact would be `{exact_key}`", inline=False)
+        e.add_field(name="Bot permissions", value="✅ usable" if ok else f"⚠️ Missing: {', '.join(missing)}", inline=False)
+
+        await ctx.send(embed=e)
+
+    @mcore.command(name="routetest", aliases=["testroute", "routeping"])
+    async def routetest(self, ctx, key: str, *, message: str = "Mattis Systems route test."):
+        """Send a test embed to a saved route."""
+        if not await require_admin(ctx):
+            return
+
+        clean_key = self.route_slug(key)
+        routes = await self.saved_routes(ctx.guild)
+        channel_id = routes.get(clean_key)
+
+        if not channel_id:
+            await ctx.send(embed=error_embed(
+                "Route not found",
+                f"`{clean_key}` is not saved.\n\nUse `!mcore routes {clean_key}` to search saved routes."
+            ))
+            return
+
+        channel = ctx.guild.get_channel(channel_id)
+
+        if not channel or not isinstance(channel, discord.TextChannel):
+            await ctx.send(embed=error_embed(
+                "Route channel invalid",
+                f"`{clean_key}` points to a missing or non-text channel."
+            ))
+            return
+
+        ok, missing = self.route_perms(channel)
+
+        if not ok:
+            await ctx.send(embed=error_embed(
+                "Route permission issue",
+                f"I cannot safely send to {channel.mention}.\nMissing: {', '.join(missing)}"
+            ))
+            return
+
+        test = embed("Mattis Systems Route Test", message, color=discord.Color.green())
+        test.add_field(name="Route key", value=f"`{clean_key}`", inline=True)
+        test.add_field(name="Sent from", value=ctx.channel.mention, inline=True)
+        test.add_field(name="Target", value=channel.mention, inline=True)
+
+        await channel.send(embed=test)
+        await ctx.send(embed=ok_embed("Route test sent", f"`{clean_key}` → {channel.mention}"))
+
+    @mcore.command(name="routetestmany")
+    async def routetestmany(self, ctx, *keys: str):
+        """Test multiple saved routes at once. Example: !mcore routetestmany billing_support_invoices development_deployments"""
+        if not await require_admin(ctx):
+            return
+
+        if not keys:
+            await ctx.send(embed=error_embed(
+                "No routes provided",
+                "Example: `!mcore routetestmany billing_support_invoices development_deployments`"
+            ))
+            return
+
+        routes = await self.saved_routes(ctx.guild)
+        results = []
+
+        for raw_key in keys[:10]:
+            clean_key = self.route_slug(raw_key)
+            channel_id = routes.get(clean_key)
+
+            if not channel_id:
+                results.append(f"❌ `{clean_key}` not found")
+                continue
+
+            channel = ctx.guild.get_channel(channel_id)
+
+            if not channel or not isinstance(channel, discord.TextChannel):
+                results.append(f"❌ `{clean_key}` invalid/missing channel")
+                continue
+
+            ok, missing = self.route_perms(channel)
+
+            if not ok:
+                results.append(f"⚠️ `{clean_key}` → {channel.mention} missing {', '.join(missing)}")
+                continue
+
+            test = embed("Mattis Systems Route Test", f"Bulk route test for `{clean_key}`.", color=discord.Color.green())
+            test.add_field(name="Route key", value=f"`{clean_key}`", inline=True)
+            test.add_field(name="Sent from", value=ctx.channel.mention, inline=True)
+
+            await channel.send(embed=test)
+            results.append(f"✅ `{clean_key}` → {channel.mention}")
+
+        await self.send_paginated(
+            ctx,
+            "Bulk Route Test Results",
+            results,
+            empty="No route tests ran.",
+            color=discord.Color.green(),
+        )
+
+
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):
         """Check saved routes against current Discord channels."""
