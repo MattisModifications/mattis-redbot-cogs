@@ -1216,6 +1216,248 @@ class MattisCore(commands.Cog):
         )
 
 
+
+    def dispatch_routes_for(self, purpose: str) -> list[str]:
+        """Purpose/event name -> ordered route keys."""
+        p = self.route_slug(purpose)
+
+        route_map = {
+            # Billing
+            "billing": ["billing_support_billing_help", "billing_support_invoices", "support"],
+            "billing_help": ["billing_support_billing_help", "billing_support_invoices", "support"],
+            "invoice": ["billing_support_invoices", "billing_support_billing_help", "support"],
+            "invoices": ["billing_support_invoices", "billing_support_billing_help", "support"],
+            "payment": ["billing_support_payments", "billing_support_billing_help", "support"],
+            "payments": ["billing_support_payments", "billing_support_billing_help", "support"],
+            "refund": ["billing_support_refunds", "billing_support_billing_help", "support"],
+            "refunds": ["billing_support_refunds", "billing_support_billing_help", "support"],
+            "chargeback": ["billing_support_chargebacks", "billing_support_billing_help", "support"],
+            "chargebacks": ["billing_support_chargebacks", "billing_support_billing_help", "support"],
+
+            # Support
+            "support": ["support_hub_support_center", "support_hub_create_ticket", "support"],
+            "ticket": ["support_hub_create_ticket", "support_hub_support_center", "support"],
+            "tickets": ["support_hub_create_ticket", "support_hub_support_center", "support"],
+            "customer_support": ["support_hub_support_center", "customers_priority_support", "support"],
+            "priority_support": ["customers_priority_support", "support_hub_support_center", "support"],
+
+            # Tech support
+            "tech": ["tech_support_tech_support", "support_hub_support_center", "support"],
+            "tech_support": ["tech_support_tech_support", "support_hub_support_center", "support"],
+            "api_help": ["tech_support_api_help", "mattis_cms_api_reference", "support"],
+            "system_error": ["tech_support_system_errors", "observatory_logs_system_log", "support"],
+            "system_errors": ["tech_support_system_errors", "observatory_logs_system_log", "support"],
+            "installation": ["tech_support_installation_help", "tech_support_tech_support", "support"],
+            "troubleshooting": ["tech_support_troubleshooting", "tech_support_tech_support", "support"],
+
+            # Security
+            "security": ["security_support_security_help", "observatory_logs_security_log", "support"],
+            "security_help": ["security_support_security_help", "observatory_logs_security_log", "support"],
+            "exploit": ["security_support_report_exploit", "observatory_logs_security_log", "operations_incidents"],
+            "report_exploit": ["security_support_report_exploit", "observatory_logs_security_log", "operations_incidents"],
+            "account_compromise": ["security_support_account_compromise", "observatory_logs_security_log", "operations_incidents"],
+            "suspicious_activity": ["security_support_suspicious_activity", "observatory_logs_security_log", "operations_incidents"],
+
+            # Bug reporting
+            "bug": ["bug_reporting_bug_reports", "mattis_cms_cms_bugs", "development_backend"],
+            "bugs": ["bug_reporting_bug_reports", "mattis_cms_cms_bugs", "development_backend"],
+            "known_issue": ["bug_reporting_known_issues", "company_hub_status", "development_backend"],
+            "known_issues": ["bug_reporting_known_issues", "company_hub_status", "development_backend"],
+
+            # Development / production
+            "development": ["development_dev_chat", "development_backend", "development_deployments"],
+            "dev": ["development_dev_chat", "development_backend", "development_deployments"],
+            "deployment": ["development_deployments", "release_engine_staging", "observatory_logs_system_log"],
+            "deployments": ["development_deployments", "release_engine_staging", "observatory_logs_system_log"],
+            "backend": ["development_backend", "development_dev_chat", "observatory_logs_api_log"],
+            "frontend": ["development_dev_chat", "brand_design_ui_design", "development_backend"],
+            "bot": ["development_bot_systems", "observatory_logs_bot_log", "development_dev_chat"],
+            "bot_systems": ["development_bot_systems", "observatory_logs_bot_log", "development_dev_chat"],
+            "qa": ["development_sprints", "release_engine_release_testing", "labs_beta_testing"],
+            "testing": ["release_engine_release_testing", "labs_beta_testing", "development_sprints"],
+
+            # Release engine
+            "release": ["release_engine_production_releases", "company_hub_releases", "development_deployments"],
+            "releases": ["release_engine_production_releases", "company_hub_releases", "development_deployments"],
+            "production_release": ["release_engine_production_releases", "company_hub_releases", "development_deployments"],
+            "staging": ["release_engine_staging", "release_engine_release_testing", "development_deployments"],
+            "release_notes": ["release_engine_release_notes", "company_hub_changelog", "company_hub_releases"],
+
+            # Incidents / operations
+            "incident": ["operations_incidents", "observatory_logs_incident_log", "company_hub_status"],
+            "incidents": ["operations_incidents", "observatory_logs_incident_log", "company_hub_status"],
+            "moderation": ["operations_moderation", "cms_staff_mod_log_review", "observatory_logs_member_log"],
+            "report": ["operations_reports", "operations_investigations", "management_board_room"],
+            "reports": ["operations_reports", "operations_investigations", "management_board_room"],
+            "investigation": ["operations_investigations", "operations_reports", "management_board_room"],
+
+            # Logs
+            "api_log": ["observatory_logs_api_log", "development_backend", "tech_support_api_help"],
+            "audit_log": ["observatory_logs_audit_log", "observatory_logs_security_log", "management_analytics"],
+            "security_log": ["observatory_logs_security_log", "security_support_security_help"],
+            "incident_log": ["observatory_logs_incident_log", "operations_incidents"],
+            "ticket_log": ["observatory_logs_ticket_log", "support_hub_support_center"],
+            "payment_log": ["observatory_logs_payment_log", "billing_support_payments"],
+            "system_log": ["observatory_logs_system_log", "tech_support_system_errors"],
+            "bot_log": ["observatory_logs_bot_log", "development_bot_systems"],
+            "member_log": ["observatory_logs_member_log", "cms_staff_user_actions"],
+            "message_log": ["observatory_logs_message_log", "cms_staff_mod_log_review"],
+
+            # Management / business
+            "management": ["management_board_room", "management_strategy", "management_analytics"],
+            "strategy": ["management_strategy", "management_board_room"],
+            "finance": ["management_finance", "billing_support_payments"],
+            "legal": ["management_legal", "arrival_rules_and_legal"],
+            "analytics": ["management_analytics", "observatory_logs_analytics_log"],
+            "sales": ["sales_business_sales", "sales_business_contact_sales"],
+            "enterprise": ["sales_business_enterprise_plans", "sales_business_contact_sales"],
+            "pricing": ["sales_business_pricing", "sales_business_sales"],
+
+            # CMS / company info
+            "status": ["company_hub_status", "company_hub_maintenance", "observatory_logs_system_log"],
+            "maintenance": ["company_hub_maintenance", "company_hub_status"],
+            "news": ["company_hub_news", "customers_customer_news"],
+            "roadmap": ["company_hub_roadmap", "mattis_cms_cms_features"],
+            "documentation": ["mattis_cms_documentation", "mattis_cms_api_reference"],
+            "api_reference": ["mattis_cms_api_reference", "tech_support_api_help"],
+            "downloads": ["mattis_cms_downloads", "customers_downloads"],
+            "cms_bug": ["mattis_cms_cms_bugs", "bug_reporting_bug_reports"],
+            "cms_feature": ["mattis_cms_cms_features", "products_services_beta_features"],
+        }
+
+        if p in route_map:
+            return route_map[p]
+
+        return [p]
+
+    async def resolve_dispatch_route(self, guild: discord.Guild, purpose: str):
+        routes = await self.saved_routes(guild)
+        candidates = self.dispatch_routes_for(purpose)
+
+        for key in candidates:
+            clean_key = self.route_slug(key)
+            channel_id = routes.get(clean_key)
+
+            if not channel_id:
+                continue
+
+            channel = guild.get_channel(channel_id)
+
+            if not channel or not isinstance(channel, discord.TextChannel):
+                continue
+
+            ok, missing = self.route_perms(channel)
+
+            if ok:
+                return clean_key, channel, candidates
+
+        return None, None, candidates
+
+    @mcore.command(name="dispatchmap")
+    async def dispatchmap(self, ctx, *, purpose: str = ""):
+        """Show dispatch purpose mapping. Example: !mcore dispatchmap invoice"""
+        if not await require_admin(ctx):
+            return
+
+        if not purpose:
+            examples = [
+                "`invoice` → billing invoices",
+                "`payment` → billing payments",
+                "`refund` → billing refunds",
+                "`chargeback` → billing chargebacks",
+                "`exploit` → security exploit reports",
+                "`deployment` → development deployments",
+                "`release` → production releases",
+                "`incident` → operations incidents",
+                "`api_log` → API logs",
+                "`system_log` → system logs",
+                "`management` → board/management",
+            ]
+            await ctx.send(embed=embed("Dispatch Map Examples", "\n".join(examples)))
+            return
+
+        key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, purpose)
+
+        lines = [f"Purpose: `{self.route_slug(purpose)}`", "", "**Candidate routes:**"]
+
+        saved = await self.saved_routes(ctx.guild)
+
+        for candidate in candidates:
+            clean = self.route_slug(candidate)
+            channel_id = saved.get(clean)
+            ch = ctx.guild.get_channel(channel_id) if channel_id else None
+            marker = "✅ selected" if clean == key else "•"
+            lines.append(f"{marker} `{clean}` → {ch.mention if ch else 'not saved'}")
+
+        await self.send_paginated(ctx, "Dispatch Route Map", lines)
+
+    @mcore.command(name="dispatch")
+    async def dispatch(self, ctx, purpose: str, *, message: str):
+        """Send a test dispatch to the correct route by purpose."""
+        if not await require_admin(ctx):
+            return
+
+        selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, purpose)
+
+        if not channel:
+            lines = [
+                f"No usable route found for `{self.route_slug(purpose)}`.",
+                "",
+                "**Tried:**",
+            ]
+            lines.extend(f"• `{self.route_slug(c)}`" for c in candidates)
+            lines.append("")
+            lines.append("Use `!mcore routes <keyword>` to check saved routes.")
+            await self.send_paginated(ctx, "Dispatch Failed", lines, color=discord.Color.red())
+            return
+
+        e = embed("Mattis Systems Dispatch", message, color=discord.Color.green())
+        e.add_field(name="Purpose", value=f"`{self.route_slug(purpose)}`", inline=True)
+        e.add_field(name="Route", value=f"`{selected_key}`", inline=True)
+        e.add_field(name="Triggered from", value=ctx.channel.mention, inline=True)
+
+        await channel.send(embed=e)
+        await ctx.send(embed=ok_embed("Dispatch sent", f"`{self.route_slug(purpose)}` → `{selected_key}` → {channel.mention}"))
+
+    @mcore.command(name="dispatchmany")
+    async def dispatchmany(self, ctx, *purposes: str):
+        """Bulk test dispatch purposes."""
+        if not await require_admin(ctx):
+            return
+
+        if not purposes:
+            await ctx.send(embed=error_embed(
+                "No purposes provided",
+                "Example: `!mcore dispatchmany invoice payment exploit deployment api_log`"
+            ))
+            return
+
+        results = []
+
+        for purpose in purposes[:15]:
+            selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, purpose)
+
+            if not channel:
+                results.append(f"❌ `{self.route_slug(purpose)}` no usable route")
+                continue
+
+            e = embed("Mattis Systems Dispatch Test", f"Bulk dispatch test for `{self.route_slug(purpose)}`.", color=discord.Color.green())
+            e.add_field(name="Purpose", value=f"`{self.route_slug(purpose)}`", inline=True)
+            e.add_field(name="Route", value=f"`{selected_key}`", inline=True)
+            e.add_field(name="Triggered from", value=ctx.channel.mention, inline=True)
+
+            await channel.send(embed=e)
+            results.append(f"✅ `{self.route_slug(purpose)}` → `{selected_key}` → {channel.mention}")
+
+        await self.send_paginated(
+            ctx,
+            "Bulk Dispatch Results",
+            results,
+            empty="No dispatch tests ran.",
+            color=discord.Color.green(),
+        )
+
+
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):
         """Check saved routes against current Discord channels."""
