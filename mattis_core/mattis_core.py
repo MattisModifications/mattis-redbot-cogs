@@ -11,7 +11,7 @@ class MattisCore(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(bot, identifier=912406121210, force_registration=True)
-        self.config.register_global(api_url="", api_token="", office_channels={})
+        self.config.register_global(api_url="", api_token="", systems_channels={})
 
     @commands.group(name="mcore")
     @commands.is_owner()
@@ -19,11 +19,11 @@ class MattisCore(commands.Cog):
         """Configure the Mattis API bridge."""
         if ctx.invoked_subcommand is None:
             api_url = await self.config.api_url()
-            channels = await self.config.office_channels()
+            channels = await self.config.systems_channels()
             e = embed("Mattis Core Config")
             e.add_field(name="API URL", value=api_url or "Not set", inline=False)
             e.add_field(name="API token", value="Set" if await self.config.api_token() else "Not set", inline=True)
-            e.add_field(name="Office channels", value=str(len(channels)), inline=True)
+            e.add_field(name="Systems channels", value=str(len(channels)), inline=True)
             await ctx.send(embed=e)
 
     @mcore.command(name="apiurl")
@@ -48,19 +48,19 @@ class MattisCore(commands.Cog):
         await self.config.api_token.set("")
         await ctx.tick()
 
-    @mcore.command(name="officechannel")
-    async def officechannel(self, ctx, key: str, channel: discord.TextChannel):
-        """Map an office channel, e.g. support #cms-support."""
-        channels = await self.config.office_channels()
+    @mcore.command(name="systemchannel")
+    async def systemchannel(self, ctx, key: str, channel: discord.TextChannel):
+        """Map an systems channel, e.g. support #cms-support."""
+        channels = await self.config.systems_channels()
         channels[key.lower()] = channel.id
-        await self.config.office_channels.set(channels)
+        await self.config.systems_channels.set(channels)
         await ctx.send(f"Mapped `{key.lower()}` to {channel.mention}.")
 
     @mcore.command(name="channels")
     async def channels(self, ctx):
-        channels = await self.config.office_channels()
+        channels = await self.config.systems_channels()
         if not channels:
-            await ctx.send("No office channels mapped yet.")
+            await ctx.send("No systems channels mapped yet.")
             return
         lines = []
         for key, cid in channels.items():

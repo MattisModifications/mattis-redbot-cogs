@@ -4,6 +4,6 @@
   "name": "mattis_crm",
   "short": "Mattis CRM commands",
   "description": "Mattis CRM commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

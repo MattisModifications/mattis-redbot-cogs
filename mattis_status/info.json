@@ -4,6 +4,6 @@
   "name": "mattis_status",
   "short": "Mattis uptime and health checks",
   "description": "Mattis uptime and health checks for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

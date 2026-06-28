@@ -4,6 +4,6 @@
   "name": "mattis_core",
   "short": "Mattis core configuration",
   "description": "Mattis core configuration for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

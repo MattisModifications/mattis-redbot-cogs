@@ -4,6 +4,6 @@
   "name": "mattis_verify",
   "short": "Mattis customer verification commands",
   "description": "Mattis customer verification commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

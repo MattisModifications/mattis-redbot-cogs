@@ -4,6 +4,6 @@
   "name": "mattis_rolesync",
   "short": "Mattis workspace role sync commands",
   "description": "Mattis workspace role sync commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

@@ -4,6 +4,6 @@
   "name": "mattis_security",
   "short": "Mattis security commands",
   "description": "Mattis security commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

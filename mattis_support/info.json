@@ -4,6 +4,6 @@
   "name": "mattis_support",
   "short": "Mattis support commands",
   "description": "Mattis support commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

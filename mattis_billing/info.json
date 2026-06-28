@@ -4,6 +4,6 @@
   "name": "mattis_billing",
   "short": "Mattis billing and invoice commands",
   "description": "Mattis billing and invoice commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }

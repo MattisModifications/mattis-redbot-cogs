@@ -4,6 +4,6 @@
   "name": "mattis_audit",
   "short": "Mattis audit commands",
   "description": "Mattis audit commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "office", "workspace"],
+  "tags": ["mattis", "cms", "systems", "workspace"],
   "requirements": []
 }
