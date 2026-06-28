@@ -1,9 +1,17 @@
 {
-  "author": ["Mattis Productions"],
+  "author": [
+    "Mattis Productions"
+  ],
   "install_msg": "Loaded Mattis uptime and health checks. Configure mattis_core first.",
   "name": "mattis_status",
   "short": "Mattis uptime and health checks",
   "description": "Mattis uptime and health checks for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "systems", "workspace"],
-  "requirements": []
+  "tags": [
+    "mattis",
+    "cms",
+    "systems",
+    "workspace"
+  ],
+  "requirements": [],
+  "version": "1.0.1"
 }

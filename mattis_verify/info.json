@@ -1,9 +1,17 @@
 {
-  "author": ["Mattis Productions"],
+  "author": [
+    "Mattis Productions"
+  ],
   "install_msg": "Loaded Mattis customer verification commands. Configure mattis_core first.",
   "name": "mattis_verify",
   "short": "Mattis customer verification commands",
   "description": "Mattis customer verification commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "systems", "workspace"],
-  "requirements": []
+  "tags": [
+    "mattis",
+    "cms",
+    "systems",
+    "workspace"
+  ],
+  "requirements": [],
+  "version": "1.0.1"
 }

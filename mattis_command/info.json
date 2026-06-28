@@ -1,9 +1,17 @@
 {
-  "author": ["Mattis Productions"],
+  "author": [
+    "Mattis Productions"
+  ],
   "install_msg": "Loaded Mattis internal command commands. Configure mattis_core first.",
   "name": "mattis_command",
   "short": "Mattis internal command commands",
   "description": "Mattis internal command commands for Mattis CMS Redbot integration.",
-  "tags": ["mattis", "cms", "command", "workspace"],
-  "requirements": []
+  "tags": [
+    "mattis",
+    "cms",
+    "command",
+    "workspace"
+  ],
+  "requirements": [],
+  "version": "1.0.1"
 }
