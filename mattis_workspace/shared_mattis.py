@@ -32,6 +32,7 @@ async def get_core_config(bot) -> Config:
         alert_state={},
         log_settings={},
         log_state={},
+        notify_settings={},
     )
     return cfg
 

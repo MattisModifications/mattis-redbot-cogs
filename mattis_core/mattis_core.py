@@ -1722,7 +1722,12 @@ class MattisCore(commands.Cog):
         e.add_field(name="Route", value=f"`{selected_key}` → {channel.mention}", inline=False)
         e.add_field(name="Triggered from", value=ctx.channel.mention, inline=True)
 
-        await channel.send(embed=e)
+        notify_content = await self.notify_content_for(ctx.guild, target["purpose"], source="manual")
+        await channel.send(
+            content=notify_content or None,
+            embed=e,
+            allowed_mentions=self.notify_allowed_mentions(),
+        )
         await ctx.send(embed=ok_embed(
             "Post sent",
             f"`{clean_key}` → `{selected_key}` → {channel.mention}"
@@ -1763,7 +1768,12 @@ class MattisCore(commands.Cog):
             e.add_field(name="Route", value=f"`{selected_key}` → {channel.mention}", inline=False)
             e.add_field(name="Triggered from", value=ctx.channel.mention, inline=True)
 
-            await channel.send(embed=e)
+            notify_content = await self.notify_content_for(ctx.guild, target["purpose"], source="manual")
+            await channel.send(
+                content=notify_content or None,
+                embed=e,
+                allowed_mentions=self.notify_allowed_mentions(),
+            )
             results.append(f"✅ `{clean_key}` → `{selected_key}` → {channel.mention}")
 
         await self.send_paginated(
@@ -2199,7 +2209,12 @@ class MattisCore(commands.Cog):
             }
 
         e = self.build_alert_embed(rule_key, rule, status, payload, issue_count, selected_key)
-        await channel.send(embed=e)
+        notify_content = await self.notify_content_for(guild, rule["purpose"], source="alerts")
+        await channel.send(
+            content=notify_content or None,
+            embed=e,
+            allowed_mentions=self.notify_allowed_mentions(),
+        )
 
         rule_state["last_sent"] = now
         rule_state["signature"] = signature
@@ -2730,7 +2745,12 @@ class MattisCore(commands.Cog):
                 continue
 
             e = self.build_log_embed(rule_key, rule, item, selected_key, index, total)
-            await channel.send(embed=e)
+            notify_content = await self.notify_content_for(guild, rule["purpose"], source="logs")
+            await channel.send(
+                content=notify_content or None,
+                embed=e,
+                allowed_mentions=self.notify_allowed_mentions(),
+            )
 
             sent += 1
 
@@ -3036,6 +3056,454 @@ class MattisCore(commands.Cog):
         await self.save_log_state(ctx.guild, {"rules": {}})
         await ctx.send(embed=ok_embed("Log state reset", "Seen-log state cleared. Next check can post current logs again."))
 
+
+
+    def notify_allowed_mentions(self):
+        return discord.AllowedMentions(roles=True, users=False, everyone=False)
+
+    async def get_notify_settings(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        settings = await cfg.guild(guild).notify_settings()
+        settings = settings or {}
+
+        settings.setdefault("enabled", False)
+        settings.setdefault("alert_mentions", True)
+        settings.setdefault("log_mentions", False)
+        settings.setdefault("manual_mentions", False)
+        settings.setdefault("dispatch_mentions", False)
+        settings.setdefault("purpose_roles", {})
+
+        return settings
+
+    async def save_notify_settings(self, guild: discord.Guild, settings: dict):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).notify_settings.set(settings)
+
+    def notify_source_enabled(self, settings: dict, source: str) -> bool:
+        source = self.route_slug(source)
+
+        if not settings.get("enabled", False):
+            return False
+
+        if source == "alerts":
+            return bool(settings.get("alert_mentions", True))
+
+        if source == "logs":
+            return bool(settings.get("log_mentions", False))
+
+        if source == "manual":
+            return bool(settings.get("manual_mentions", False))
+
+        if source == "dispatch":
+            return bool(settings.get("dispatch_mentions", False))
+
+        return False
+
+    def notify_spec_for_purpose(self, purpose: str) -> dict:
+        p = self.route_slug(purpose)
+
+        # Default targeted pings. Custom role mappings can be added on top.
+        if any(x in p for x in ["invoice", "payment", "refund", "chargeback", "billing", "pastdue", "finance"]):
+            return {
+                "sections": ["management"],
+                "role_keywords": ["billing_support", "support_lead"],
+            }
+
+        if any(x in p for x in ["exploit", "security", "account_compromise", "suspicious", "security_log"]):
+            return {
+                "sections": ["management"],
+                "role_keywords": ["security_admin", "security_support", "incident_response", "senior_moderator"],
+            }
+
+        if any(x in p for x in ["incident", "critical", "outage", "downtime", "incident_log"]):
+            return {
+                "sections": ["management", "administration", "development"],
+                "role_keywords": ["incident_response", "security_admin", "senior_moderator", "release_manager"],
+            }
+
+        if any(x in p for x in ["deployment", "deploy", "release", "production", "staging"]):
+            return {
+                "sections": ["development", "administration"],
+                "role_keywords": ["lead_developer", "release_manager", "infrastructure_admin"],
+            }
+
+        if any(x in p for x in ["api_log", "system_log", "bot_log", "system_error", "backend", "frontend", "development", "automation"]):
+            return {
+                "sections": ["development"],
+                "role_keywords": ["lead_developer", "developer", "release_manager", "infrastructure_admin"],
+            }
+
+        if any(x in p for x in ["audit", "audit_log", "highrisk", "high_risk"]):
+            return {
+                "sections": ["management"],
+                "role_keywords": ["audit_reviewer", "security_admin", "senior_moderator"],
+            }
+
+        if any(x in p for x in ["support", "ticket", "tickets", "customer", "priority_support"]):
+            return {
+                "sections": ["support", "moderation"],
+                "role_keywords": ["support_lead", "support_agent", "technical_support"],
+            }
+
+        if any(x in p for x in ["staff", "member", "member_log"]):
+            return {
+                "sections": ["management", "administration"],
+                "role_keywords": [],
+            }
+
+        if any(x in p for x in ["management", "strategy", "legal", "analytics"]):
+            return {
+                "sections": ["management"],
+                "role_keywords": [],
+            }
+
+        return {
+            "sections": ["management"],
+            "role_keywords": [],
+        }
+
+    async def notify_role_ids_for(self, guild: discord.Guild, purpose: str) -> list[int]:
+        settings = await self.get_notify_settings(guild)
+        sections = await self.saved_sections(guild)
+        spec = self.notify_spec_for_purpose(purpose)
+        role_ids: set[int] = set()
+
+        purpose_key = self.route_slug(purpose)
+        custom_roles = settings.get("purpose_roles", {}) or {}
+
+        for rid in custom_roles.get(purpose_key, []) or []:
+            role_ids.add(int(rid))
+
+        section_keywords = [self.route_slug(x) for x in spec.get("sections", [])]
+        role_keywords = [self.route_slug(x) for x in spec.get("role_keywords", [])]
+
+        for section_name, ids in sections.items():
+            section_slug = self.route_slug(section_name)
+
+            if any(keyword in section_slug for keyword in section_keywords):
+                for rid in ids or []:
+                    role_ids.add(int(rid))
+
+        for role in guild.roles:
+            if role == guild.default_role or role.managed:
+                continue
+
+            role_slug = self.route_slug(role.name)
+
+            if any(keyword in role_slug for keyword in role_keywords):
+                role_ids.add(role.id)
+
+        live_roles = []
+
+        for rid in role_ids:
+            role = guild.get_role(int(rid))
+            if role:
+                live_roles.append(role)
+
+        live_roles = sorted(live_roles, key=lambda r: r.position, reverse=True)
+
+        return [role.id for role in live_roles]
+
+    async def notify_content_for(self, guild: discord.Guild, purpose: str, *, source: str = "alerts", force: bool = False) -> str:
+        settings = await self.get_notify_settings(guild)
+
+        if not force and not self.notify_source_enabled(settings, source):
+            return ""
+
+        role_ids = await self.notify_role_ids_for(guild, purpose)
+
+        mentions = []
+
+        for rid in role_ids:
+            role = guild.get_role(int(rid))
+            if role:
+                mentions.append(role.mention)
+
+        return " ".join(mentions)
+
+    @mcore.group(name="notify", invoke_without_command=True)
+    async def notify(self, ctx):
+        """Mention/ping routing for alerts and logs."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+
+        e = embed("Mattis Notify Engine")
+        e.add_field(name="Global", value="✅ enabled" if settings.get("enabled") else "❌ disabled", inline=True)
+        e.add_field(name="Alert mentions", value="✅ on" if settings.get("alert_mentions") else "❌ off", inline=True)
+        e.add_field(name="Log mentions", value="✅ on" if settings.get("log_mentions") else "❌ off", inline=True)
+        e.add_field(name="Manual post mentions", value="✅ on" if settings.get("manual_mentions") else "❌ off", inline=True)
+        e.add_field(name="Dispatch mentions", value="✅ on" if settings.get("dispatch_mentions") else "❌ off", inline=True)
+        e.add_field(
+            name="Commands",
+            value="`!mcore notify preview invoice`\n"
+                  "`!mcore notify test invoice`\n"
+                  "`!mcore notify enable`\n"
+                  "`!mcore notify disable`\n"
+                  "`!mcore notify alerts on/off`\n"
+                  "`!mcore notify logs on/off`",
+            inline=False,
+        )
+
+        await ctx.send(embed=e)
+
+    @notify.command(name="enable")
+    async def notify_enable(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+        settings["enabled"] = True
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Notify enabled", "Alert role pings are now enabled."))
+
+    @notify.command(name="disable")
+    async def notify_disable(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+        settings["enabled"] = False
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Notify disabled", "Role pings are now disabled."))
+
+    def parse_on_off(self, value: str) -> bool | None:
+        value = self.route_slug(value)
+
+        if value in ["on", "enable", "enabled", "yes", "true", "1"]:
+            return True
+
+        if value in ["off", "disable", "disabled", "no", "false", "0"]:
+            return False
+
+        return None
+
+    @notify.command(name="alerts")
+    async def notify_alerts(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = self.parse_on_off(mode)
+
+        if enabled is None:
+            await ctx.send(embed=error_embed("Invalid mode", "Use `on` or `off`."))
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+        settings["alert_mentions"] = enabled
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Alert mentions updated", f"Alert mentions are now `{'on' if enabled else 'off'}`."))
+
+    @notify.command(name="logs")
+    async def notify_logs(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = self.parse_on_off(mode)
+
+        if enabled is None:
+            await ctx.send(embed=error_embed("Invalid mode", "Use `on` or `off`."))
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+        settings["log_mentions"] = enabled
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Log mentions updated", f"Log mentions are now `{'on' if enabled else 'off'}`."))
+
+    @notify.command(name="manual")
+    async def notify_manual(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = self.parse_on_off(mode)
+
+        if enabled is None:
+            await ctx.send(embed=error_embed("Invalid mode", "Use `on` or `off`."))
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+        settings["manual_mentions"] = enabled
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Manual post mentions updated", f"Manual post mentions are now `{'on' if enabled else 'off'}`."))
+
+    @notify.command(name="dispatch")
+    async def notify_dispatch(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = self.parse_on_off(mode)
+
+        if enabled is None:
+            await ctx.send(embed=error_embed("Invalid mode", "Use `on` or `off`."))
+            return
+
+        settings = await self.get_notify_settings(ctx.guild)
+        settings["dispatch_mentions"] = enabled
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Dispatch mentions updated", f"Dispatch mentions are now `{'on' if enabled else 'off'}`."))
+
+    @notify.command(name="preview")
+    async def notify_preview(self, ctx, *, purpose: str):
+        """Preview roles that would be pinged for a purpose."""
+        if not await require_admin(ctx):
+            return
+
+        purpose_key = self.route_slug(purpose)
+        role_ids = await self.notify_role_ids_for(ctx.guild, purpose_key)
+        spec = self.notify_spec_for_purpose(purpose_key)
+
+        lines = [
+            f"Purpose: `{purpose_key}`",
+            "",
+            "**Default section keywords:**",
+            ", ".join(f"`{x}`" for x in spec.get("sections", [])) or "None",
+            "",
+            "**Default role keywords:**",
+            ", ".join(f"`{x}`" for x in spec.get("role_keywords", [])) or "None",
+            "",
+            "**Roles that would be mentioned:**",
+        ]
+
+        if role_ids:
+            for rid in role_ids:
+                role = ctx.guild.get_role(int(rid))
+                lines.append(f"• {role.mention if role else f'`missing:{rid}`'}")
+        else:
+            lines.append("No matching roles found.")
+
+        await self.send_paginated(ctx, "Notify Preview", lines)
+
+    @notify.command(name="test")
+    async def notify_test(self, ctx, purpose: str, *, message: str = "Mattis notify test."):
+        """Send a routed test message with role mentions."""
+        if not await require_admin(ctx):
+            return
+
+        purpose_key = self.route_slug(purpose)
+        selected_key, channel, candidates = await self.resolve_dispatch_route(ctx.guild, purpose_key)
+
+        if not channel:
+            await ctx.send(embed=error_embed(
+                "No route found",
+                f"No usable route found for `{purpose_key}`."
+            ))
+            return
+
+        content = await self.notify_content_for(ctx.guild, purpose_key, source="alerts", force=True)
+
+        e = embed("Mattis Notify Test", message, color=discord.Color.gold())
+        e.add_field(name="Purpose", value=f"`{purpose_key}`", inline=True)
+        e.add_field(name="Route", value=f"`{selected_key}`", inline=True)
+        e.add_field(name="Target", value=channel.mention, inline=True)
+        e.add_field(name="Mention content", value=content or "No roles matched.", inline=False)
+
+        await channel.send(
+            content=content or None,
+            embed=e,
+            allowed_mentions=self.notify_allowed_mentions(),
+        )
+
+        await ctx.send(embed=ok_embed("Notify test sent", f"`{purpose_key}` → `{selected_key}` → {channel.mention}"))
+
+    @notify.command(name="addrole")
+    async def notify_addrole(self, ctx, purpose: str, role: discord.Role):
+        """Add an exact role mention for a purpose."""
+        if not await require_admin(ctx):
+            return
+
+        if role == ctx.guild.default_role:
+            await ctx.send(embed=error_embed("Unsafe role", "I will not notify @everyone."))
+            return
+
+        purpose_key = self.route_slug(purpose)
+        settings = await self.get_notify_settings(ctx.guild)
+        purpose_roles = settings.setdefault("purpose_roles", {})
+        purpose_roles.setdefault(purpose_key, [])
+
+        if role.id not in purpose_roles[purpose_key]:
+            purpose_roles[purpose_key].append(role.id)
+
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Notify role added", f"`{purpose_key}` will also mention {role.mention}."))
+
+    @notify.command(name="removerole")
+    async def notify_removerole(self, ctx, purpose: str, role: discord.Role):
+        """Remove an exact role mention for a purpose."""
+        if not await require_admin(ctx):
+            return
+
+        purpose_key = self.route_slug(purpose)
+        settings = await self.get_notify_settings(ctx.guild)
+        purpose_roles = settings.setdefault("purpose_roles", {})
+        purpose_roles[purpose_key] = [rid for rid in purpose_roles.get(purpose_key, []) if int(rid) != role.id]
+
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Notify role removed", f"{role.mention} removed from `{purpose_key}`."))
+
+    @notify.command(name="clear")
+    async def notify_clear(self, ctx, *, purpose: str):
+        """Clear custom exact role mentions for a purpose."""
+        if not await require_admin(ctx):
+            return
+
+        purpose_key = self.route_slug(purpose)
+        settings = await self.get_notify_settings(ctx.guild)
+        purpose_roles = settings.setdefault("purpose_roles", {})
+        purpose_roles.pop(purpose_key, None)
+
+        await self.save_notify_settings(ctx.guild, settings)
+
+        await ctx.send(embed=ok_embed("Notify custom roles cleared", f"Custom roles cleared for `{purpose_key}`."))
+
+    @notify.command(name="list")
+    async def notify_list(self, ctx):
+        """Show useful notify purposes."""
+        if not await require_admin(ctx):
+            return
+
+        purposes = [
+            "invoice",
+            "payment",
+            "refund",
+            "chargeback",
+            "support",
+            "ticket",
+            "security",
+            "exploit",
+            "account_compromise",
+            "suspicious_activity",
+            "incident",
+            "deployment",
+            "release",
+            "api_log",
+            "system_log",
+            "bot_log",
+            "audit_log",
+            "management",
+        ]
+
+        lines = []
+
+        for purpose in purposes:
+            role_ids = await self.notify_role_ids_for(ctx.guild, purpose)
+            mentions = []
+            for rid in role_ids[:8]:
+                role = ctx.guild.get_role(int(rid))
+                if role:
+                    mentions.append(role.mention)
+
+            lines.append(f"`{purpose}` → {' '.join(mentions) if mentions else 'No roles matched'}")
+
+        await self.send_paginated(ctx, "Notify Purpose List", lines)
 
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):
