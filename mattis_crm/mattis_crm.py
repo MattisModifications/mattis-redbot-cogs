@@ -10,6 +10,7 @@ from .shared_mattis import (
     user_line,
     q,
     simple_counts_embed,
+    require_support,
 )
 
 
@@ -64,7 +65,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="atrisk")
     async def atrisk(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/atrisk")
@@ -72,7 +73,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="suspended")
     async def suspended(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/suspended")
@@ -80,7 +81,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="frozen")
     async def frozen(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/frozen")

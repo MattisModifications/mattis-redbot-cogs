@@ -1,6 +1,13 @@
 from redbot.core import commands
 
-from .shared_mattis import embed, request_json, require_staff, require_admin, simple_counts_embed
+from .shared_mattis import (
+    embed,
+    request_json,
+    require_staff,
+    require_admin,
+    simple_counts_embed,
+    require_development,
+)
 
 
 class MattisAutomation(commands.Cog):
@@ -41,7 +48,7 @@ class MattisAutomation(commands.Cog):
 
     @mautomation.command(name="run")
     async def run(self, ctx, *, workflow: str):
-        if not await require_admin(ctx):
+        if not await require_development(ctx):
             return
 
         await ctx.send(embed=embed("Run Workflow", "Workflow execution will be enabled in the controlled admin-action phase."))

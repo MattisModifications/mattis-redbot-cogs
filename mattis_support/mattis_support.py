@@ -8,6 +8,7 @@ from .shared_mattis import (
     ticket_line,
     q,
     simple_counts_embed,
+    require_support,
 )
 
 

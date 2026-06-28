@@ -1,6 +1,11 @@
 from redbot.core import commands
 
-from .shared_mattis import embed, request_json, require_staff, simple_counts_embed
+from .shared_mattis import (
+    embed,
+    request_json,
+    require_staff,
+    simple_counts_embed,
+)
 
 
 class MattisApplications(commands.Cog):

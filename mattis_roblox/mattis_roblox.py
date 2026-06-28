@@ -9,6 +9,7 @@ from .shared_mattis import (
     line_list,
     workspace_line,
     q,
+    require_development,
 )
 
 
@@ -62,7 +63,7 @@ class MattisRoblox(commands.Cog):
 
     @mroblox.command(name="forcesync")
     async def forcesync(self, ctx, *, workspace: str):
-        if not await require_admin(ctx):
+        if not await require_development(ctx):
             return
 
         await ctx.send(embed=embed("Roblox Force Sync", "Force-sync actions will be enabled in the controlled admin-action phase."))

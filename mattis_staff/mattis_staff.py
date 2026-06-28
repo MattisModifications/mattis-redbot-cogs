@@ -9,6 +9,7 @@ from .shared_mattis import (
     line_list,
     staff_line,
     q,
+    require_management,
 )
 
 
@@ -42,7 +43,7 @@ class MattisStaff(commands.Cog):
 
     @mstaff.command(name="permissions")
     async def permissions(self, ctx, *, query: str = ""):
-        if not await require_admin(ctx):
+        if not await require_management(ctx):
             return
 
         await self.lookup(ctx, query=query or " ")

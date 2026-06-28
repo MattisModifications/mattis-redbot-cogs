@@ -373,6 +373,30 @@ async def require_development(ctx) -> bool:
     return False
 
 
+
+
+async def require_support(ctx) -> bool:
+    if await is_support(ctx):
+        return True
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        "You need Support Team, Moderation & Support, Management, or Admin access.",
+    ))
+    return False
+
+
+async def require_administration(ctx) -> bool:
+    if await is_administration(ctx):
+        return True
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        "You need Administration Team, Management, or Admin access.",
+    ))
+    return False
+
+
 async def require_billing(ctx) -> bool:
     if await is_billing(ctx):
         return True

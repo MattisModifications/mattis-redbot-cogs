@@ -88,7 +88,7 @@ class MattisWorkspace(commands.Cog):
 
     @mworkspace.command(name="audit")
     async def audit(self, ctx, *, workspace: str):
-        if not await require_admin(ctx):
+        if not await require_staff(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/audit/search?q={q(workspace)}")

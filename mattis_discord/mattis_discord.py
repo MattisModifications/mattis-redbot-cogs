@@ -9,6 +9,7 @@ from .shared_mattis import (
     line_list,
     workspace_line,
     q,
+    require_development,
 )
 
 
@@ -60,7 +61,7 @@ class MattisDiscord(commands.Cog):
 
     @mdiscord.command(name="test")
     async def test(self, ctx, *, workspace: str):
-        if not await require_admin(ctx):
+        if not await require_development(ctx):
             return
 
         await ctx.send(embed=embed("Discord Test", "Test-message actions will be enabled in the controlled admin-action phase."))
