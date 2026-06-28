@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import re
 import discord
 from redbot.core import commands
 
 from .shared_mattis import (
     embed,
     ok_embed,
+    error_embed,
     get_core_config,
     request_json,
     fmt_payload,
     require_admin,
+    trim,
+    norm,
 )
 
 
@@ -18,6 +22,144 @@ class MattisCore(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+
+    def is_separator_role(self, role: discord.Role) -> bool:
+        name = role.name
+        dash_count = sum(1 for ch in name if ch in "-–—")
+        cleaned = self.clean_separator_name(name)
+        return dash_count >= 6 and len(cleaned) >= 3
+
+    def clean_separator_name(self, name: str) -> str:
+        cleaned = re.sub(r"[-–—_]+", " ", name)
+        cleaned = re.sub(r"[^\w &/+]+", " ", cleaned)
+        cleaned = " ".join(cleaned.split())
+        return cleaned.strip()
+
+    def parse_role_sections(self, guild: discord.Guild) -> dict[str, list[int]]:
+        sections: dict[str, list[int]] = {}
+        current_section: str | None = None
+
+        roles = sorted(guild.roles, key=lambda r: r.position, reverse=True)
+
+        for role in roles:
+            if role == guild.default_role:
+                continue
+
+            if self.is_separator_role(role):
+                current_section = self.clean_separator_name(role.name)
+                sections.setdefault(current_section, [])
+                continue
+
+            if current_section is None:
+                continue
+
+            if role.managed:
+                continue
+
+            sections.setdefault(current_section, [])
+
+            if role.id not in sections[current_section]:
+                sections[current_section].append(role.id)
+
+        return sections
+
+    def role_mentions(self, guild: discord.Guild, ids: list[int]) -> str:
+        lines = []
+
+        for rid in ids:
+            role = guild.get_role(rid)
+            lines.append(role.mention if role else f"`missing:{rid}`")
+
+        return "\n".join(lines) or "None"
+
+    def section_summary(self, guild: discord.Guild, sections: dict[str, list[int]], *, limit: int = 12) -> str:
+        lines = []
+
+        for name, ids in sections.items():
+            lines.append(f"**{name}** — `{len(ids)}` roles")
+            for rid in ids[:limit]:
+                role = guild.get_role(rid)
+                lines.append(f"• {role.mention if role else f'`missing:{rid}`'}")
+            lines.append("")
+
+        return trim("\n".join(lines).strip() or "No role groups found.", 3900)
+
+    def channel_label(self, channel: discord.abc.GuildChannel) -> str:
+        category = getattr(channel, "category", None)
+        category_name = category.name if category else "No category"
+        synced = getattr(channel, "permissions_synced", None)
+
+        if synced is True:
+            sync_text = "synced"
+        elif synced is False:
+            sync_text = "not synced"
+        else:
+            sync_text = "n/a"
+
+        mention = channel.mention if hasattr(channel, "mention") else channel.name
+        return f"{mention} · `{category_name}` · {sync_text}"
+
+    def bot_perm_line(self, channel: discord.abc.GuildChannel) -> str:
+        me = channel.guild.me
+        perms = channel.permissions_for(me)
+
+        checks = [
+            ("View", perms.view_channel),
+            ("Send", getattr(perms, "send_messages", False)),
+            ("Embed", getattr(perms, "embed_links", False)),
+            ("History", getattr(perms, "read_message_history", False)),
+            ("Manage", getattr(perms, "manage_channels", False)),
+        ]
+
+        return " · ".join(f"{'✅' if ok else '❌'} {name}" for name, ok in checks)
+
+    def role_risk_line(self, role: discord.Role, guild: discord.Guild) -> str:
+        flags = []
+
+        if role == guild.default_role:
+            flags.append("@everyone")
+
+        if role.managed:
+            flags.append("managed")
+
+        if role.permissions.administrator:
+            flags.append("administrator")
+
+        if role.permissions.manage_guild:
+            flags.append("manage server")
+
+        if role.permissions.manage_roles:
+            flags.append("manage roles")
+
+        if guild.me and role >= guild.me.top_role:
+            flags.append("above/equal bot")
+
+        suffix = f" · {', '.join(flags)}" if flags else ""
+
+        return f"{role.mention} · pos `{role.position}`{suffix}"
+
+    async def saved_sections(self, guild: discord.Guild) -> dict[str, list[int]]:
+        cfg = await get_core_config(self.bot)
+        sections = await cfg.guild(guild).role_sections()
+        return sections or {}
+
+    async def save_sections(self, guild: discord.Guild, sections: dict[str, list[int]]):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).role_sections.set(sections)
+
+        # Compatibility with the older gates.
+        staff_ids = []
+        admin_ids = []
+
+        for name, ids in sections.items():
+            n = norm(name)
+            if "support" in n or "moderation" in n or "development" in n or "staff" in n:
+                staff_ids.extend(ids)
+            if "administration" in n:
+                admin_ids.extend(ids)
+
+        await cfg.guild(guild).staff_roles.set(list(dict.fromkeys(staff_ids)))
+        await cfg.guild(guild).admin_roles.set(list(dict.fromkeys(admin_ids)))
 
     @commands.group(name="mcore", invoke_without_command=True)
     async def mcore(self, ctx):
@@ -28,21 +170,19 @@ class MattisCore(commands.Cog):
         cfg = await get_core_config(self.bot)
         api_url = await cfg.api_url()
         channels = await cfg.guild(ctx.guild).systems_channels() if ctx.guild else {}
-        staff_roles = await cfg.guild(ctx.guild).staff_roles() if ctx.guild else []
-        admin_roles = await cfg.guild(ctx.guild).admin_roles() if ctx.guild else []
+        sections = await self.saved_sections(ctx.guild) if ctx.guild else {}
 
         e = embed("Mattis Core Config")
         e.add_field(name="API URL", value=api_url or "Not set", inline=False)
         e.add_field(name="API token", value="Set" if await cfg.api_token() else "Not set", inline=True)
         e.add_field(name="Systems channels", value=str(len(channels or {})), inline=True)
-        e.add_field(name="Staff roles", value=str(len(staff_roles or [])), inline=True)
-        e.add_field(name="Admin roles", value=str(len(admin_roles or [])), inline=True)
+        e.add_field(name="Role groups", value=str(len(sections or {})), inline=True)
+
         await ctx.send(embed=e)
 
     @mcore.command(name="apiurl")
     @commands.is_owner()
     async def apiurl(self, ctx, url: str):
-        """Set the Mattis API URL."""
         cfg = await get_core_config(self.bot)
         await cfg.api_url.set(url.rstrip("/"))
         await ctx.send(embed=ok_embed("API URL saved", url.rstrip("/")))
@@ -50,7 +190,6 @@ class MattisCore(commands.Cog):
     @mcore.command(name="token")
     @commands.is_owner()
     async def token(self, ctx, *, token: str):
-        """Set the private Mattis bot API token."""
         cfg = await get_core_config(self.bot)
         await cfg.api_token.set(token.strip())
 
@@ -59,31 +198,116 @@ class MattisCore(commands.Cog):
         except discord.HTTPException:
             pass
 
-        await ctx.send(
-            embed=ok_embed("Token saved", "Private token saved. Delete any visible token messages."),
-            delete_after=10,
-        )
+        await ctx.send(embed=ok_embed("Token saved", "Private token saved. Delete any visible token messages."), delete_after=10)
 
     @mcore.command(name="cleartoken")
     @commands.is_owner()
     async def cleartoken(self, ctx):
-        """Clear the private Mattis bot API token."""
         cfg = await get_core_config(self.bot)
         await cfg.api_token.set("")
         await ctx.send(embed=ok_embed("Token cleared"))
 
-    @mcore.command(name="systemchannel")
-    async def systemchannel(self, ctx, key: str, channel: discord.TextChannel):
-        """Map a Mattis Systems channel, e.g. support #cms-support."""
+    @mcore.command(name="maprole")
+    async def maprole(self, ctx, role: discord.Role, *, group: str):
+        """Manually add a role to a saved role group. Usage: !mcore maprole @Role Support Team"""
+        if not await require_admin(ctx):
+            return
+
+        if role == ctx.guild.default_role:
+            await ctx.send(embed=error_embed("Unsafe role", "I will not map @everyone."))
+            return
+
+        if role.managed:
+            await ctx.send(embed=error_embed("Unsafe role", "I will not map bot/integration-managed roles."))
+            return
+
+        group = " ".join(group.split()).strip()
+        sections = await self.saved_sections(ctx.guild)
+        sections.setdefault(group, [])
+
+        if role.id not in sections[group]:
+            sections[group].append(role.id)
+
+        await self.save_sections(ctx.guild, sections)
+        await ctx.send(embed=ok_embed("Role mapped", f"{role.mention} added to **{group}**."))
+
+    @mcore.command(name="unmaprole")
+    async def unmaprole(self, ctx, role: discord.Role, *, group: str):
+        """Remove a role from a saved role group. Usage: !mcore unmaprole @Role Support Team"""
+        if not await require_admin(ctx):
+            return
+
+        group = " ".join(group.split()).strip()
+        sections = await self.saved_sections(ctx.guild)
+
+        if group in sections:
+            sections[group] = [rid for rid in sections[group] if rid != role.id]
+
+        await self.save_sections(ctx.guild, sections)
+        await ctx.send(embed=ok_embed("Role unmapped", f"{role.mention} removed from **{group}**."))
+
+    @mcore.command(name="groups")
+    async def groups(self, ctx):
+        """Show saved role groups."""
+        if not await require_admin(ctx):
+            return
+
+        sections = await self.saved_sections(ctx.guild)
+        await ctx.send(embed=embed("Saved Role Groups", self.section_summary(ctx.guild, sections)))
+
+    @mcore.command(name="group")
+    async def group(self, ctx, *, group: str):
+        """Show one saved role group."""
+        if not await require_admin(ctx):
+            return
+
+        sections = await self.saved_sections(ctx.guild)
+        wanted = norm(group)
+
+        for name, ids in sections.items():
+            if norm(name) == wanted or wanted in norm(name):
+                e = embed(f"Role Group: {name}", self.role_mentions(ctx.guild, ids))
+                e.add_field(name="Role count", value=str(len(ids)), inline=True)
+                await ctx.send(embed=e)
+                return
+
+        await ctx.send(embed=error_embed("Role group not found", group))
+
+    @mcore.command(name="staffrole")
+    async def staffrole(self, ctx, role: discord.Role):
+        """Compatibility shortcut."""
+        await self.maprole(ctx, role, group="Staff")
+
+    @mcore.command(name="adminrole")
+    async def adminrole(self, ctx, role: discord.Role):
+        """Compatibility shortcut."""
+        await self.maprole(ctx, role, group="Administration Team")
+
+    @mcore.command(name="mapchannel", aliases=["systemchannel"])
+    async def mapchannel(self, ctx, key: str, channel: discord.TextChannel):
+        """Map a Mattis Systems channel."""
         if not await require_admin(ctx):
             return
 
         cfg = await get_core_config(self.bot)
         channels = await cfg.guild(ctx.guild).systems_channels()
-        channels[key.lower()] = channel.id
+        channels[key.lower().strip()] = channel.id
         await cfg.guild(ctx.guild).systems_channels.set(channels)
 
-        await ctx.send(embed=ok_embed("Systems channel mapped", f"`{key.lower()}` → {channel.mention}"))
+        await ctx.send(embed=ok_embed("Systems channel mapped", f"`{key.lower().strip()}` → {channel.mention}"))
+
+    @mcore.command(name="unmapchannel")
+    async def unmapchannel(self, ctx, key: str):
+        """Remove a Mattis Systems channel mapping."""
+        if not await require_admin(ctx):
+            return
+
+        cfg = await get_core_config(self.bot)
+        channels = await cfg.guild(ctx.guild).systems_channels()
+        channels.pop(key.lower().strip(), None)
+        await cfg.guild(ctx.guild).systems_channels.set(channels)
+
+        await ctx.send(embed=ok_embed("Systems channel unmapped", f"`{key}` removed."))
 
     @mcore.command(name="channels")
     async def channels(self, ctx):
@@ -100,62 +324,217 @@ class MattisCore(commands.Cog):
 
         lines = []
         for key, cid in channels.items():
-            ch = ctx.guild.get_channel(cid) if ctx.guild else None
-            lines.append(f"`{key}` → {ch.mention if ch else cid}")
+            ch = ctx.guild.get_channel(cid)
+            lines.append(f"`{key}` → {ch.mention if ch else f'missing:{cid}'}")
 
         await ctx.send(embed=embed("Systems channels", "\n".join(lines)))
 
-    @mcore.command(name="staffrole")
-    async def staffrole(self, ctx, role: discord.Role):
-        """Add a Mattis Systems staff role."""
+    @mcore.command(name="mappings")
+    async def mappings(self, ctx):
+        """Show role and channel mappings."""
         if not await require_admin(ctx):
             return
 
         cfg = await get_core_config(self.bot)
-        roles = await cfg.guild(ctx.guild).staff_roles()
+        channels = await cfg.guild(ctx.guild).systems_channels()
+        sections = await self.saved_sections(ctx.guild)
 
-        if role.id not in roles:
-            roles.append(role.id)
+        e = embed("Mattis Systems Mappings")
+        e.add_field(name="Role groups", value=self.section_summary(ctx.guild, sections, limit=5), inline=False)
 
-        await cfg.guild(ctx.guild).staff_roles.set(roles)
-        await ctx.send(embed=ok_embed("Staff role added", role.mention))
+        channel_lines = []
+        for key, cid in channels.items():
+            ch = ctx.guild.get_channel(cid)
+            channel_lines.append(f"`{key}` → {ch.mention if ch else f'missing:{cid}'}")
 
-    @mcore.command(name="adminrole")
-    async def adminrole(self, ctx, role: discord.Role):
-        """Add a Mattis Systems admin role."""
-        if not await require_admin(ctx):
-            return
+        e.add_field(name="Channels", value="\n".join(channel_lines) if channel_lines else "None configured", inline=False)
 
-        cfg = await get_core_config(self.bot)
-        roles = await cfg.guild(ctx.guild).admin_roles()
-
-        if role.id not in roles:
-            roles.append(role.id)
-
-        await cfg.guild(ctx.guild).admin_roles.set(roles)
-        await ctx.send(embed=ok_embed("Admin role added", role.mention))
+        await ctx.send(embed=e)
 
     @mcore.command(name="permissions")
     async def permissions(self, ctx):
-        """Show Mattis Systems permission gates."""
+        """Show Mattis Systems permission mappings."""
+        if not await require_admin(ctx):
+            return
+        await self.mappings(ctx)
+
+    @mcore.group(name="scan", invoke_without_command=True)
+    async def scan(self, ctx):
+        """Read-only Discord server scan."""
         if not await require_admin(ctx):
             return
 
-        cfg = await get_core_config(self.bot)
-        staff_roles = await cfg.guild(ctx.guild).staff_roles()
-        admin_roles = await cfg.guild(ctx.guild).admin_roles()
+        e = embed("Discord Discovery Scan")
+        e.add_field(name="Roles", value=str(len(ctx.guild.roles)), inline=True)
+        e.add_field(name="Categories", value=str(len(ctx.guild.categories)), inline=True)
+        e.add_field(name="Text channels", value=str(len(ctx.guild.text_channels)), inline=True)
+        e.add_field(name="Safety", value="Read-only scan. No roles, channels, or permissions are edited.", inline=False)
+        e.add_field(name="Next", value="Run `!mcore scan rolegroups`, `!mcore scan channels`, `!mcore scan permissions`, then `!mcore importgroups preview`.", inline=False)
 
-        def fmt_roles(ids):
-            parts = []
-            for rid in ids:
-                role = ctx.guild.get_role(rid)
-                parts.append(role.mention if role else str(rid))
-            return "\n".join(parts) or "None configured"
+        await ctx.send(embed=e)
 
-        e = embed("Mattis Systems Permissions")
-        e.add_field(name="Staff roles", value=fmt_roles(staff_roles), inline=False)
-        e.add_field(name="Admin roles", value=fmt_roles(admin_roles), inline=False)
-        e.add_field(name="Fallbacks", value="Administrator = admin\nManage Server = staff", inline=False)
+    @scan.command(name="roles")
+    async def scan_roles(self, ctx):
+        """Scan visible roles."""
+        if not await require_admin(ctx):
+            return
+
+        roles = sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True)
+        lines = []
+
+        for role in roles:
+            if role == ctx.guild.default_role:
+                continue
+
+            if self.is_separator_role(role):
+                lines.append(f"**GROUP HEADER:** `{self.clean_separator_name(role.name)}`")
+            else:
+                lines.append(self.role_risk_line(role, ctx.guild))
+
+            if len(lines) >= 25:
+                break
+
+        await ctx.send(embed=embed("Role Scan", trim("\n".join(lines), 3900)))
+
+    @scan.command(name="rolegroups")
+    async def scan_rolegroups(self, ctx):
+        """Scan dashed role headers and child roles."""
+        if not await require_admin(ctx):
+            return
+
+        sections = self.parse_role_sections(ctx.guild)
+        await ctx.send(embed=embed("Detected Role Groups", self.section_summary(ctx.guild, sections)))
+
+    @scan.command(name="categories")
+    async def scan_categories(self, ctx):
+        """Scan categories and bot permissions."""
+        if not await require_admin(ctx):
+            return
+
+        lines = []
+
+        for category in sorted(ctx.guild.categories, key=lambda c: c.position):
+            perms = self.bot_perm_line(category)
+            lines.append(f"**{category.name}** · pos `{category.position}` · channels `{len(category.channels)}`\n{perms}")
+
+            if len(lines) >= 12:
+                break
+
+        await ctx.send(embed=embed("Category Scan", trim("\n\n".join(lines), 3900)))
+
+    @scan.command(name="channels")
+    async def scan_channels(self, ctx):
+        """Scan text channels, categories, sync state, and bot permissions."""
+        if not await require_admin(ctx):
+            return
+
+        lines = []
+
+        for channel in sorted(ctx.guild.text_channels, key=lambda c: (c.category.position if c.category else 999, c.position)):
+            lines.append(f"{self.channel_label(channel)}\n{self.bot_perm_line(channel)}")
+
+            if len(lines) >= 15:
+                break
+
+        await ctx.send(embed=embed("Channel Scan", trim("\n\n".join(lines), 3900)))
+
+    @scan.command(name="permissions")
+    async def scan_permissions(self, ctx):
+        """Find channels where the bot cannot properly send embeds."""
+        if not await require_admin(ctx):
+            return
+
+        issues = []
+
+        for channel in ctx.guild.text_channels:
+            perms = channel.permissions_for(ctx.guild.me)
+            missing = []
+
+            if not perms.view_channel:
+                missing.append("View Channel")
+            if not perms.send_messages:
+                missing.append("Send Messages")
+            if not perms.embed_links:
+                missing.append("Embed Links")
+            if not perms.read_message_history:
+                missing.append("Read Message History")
+
+            if missing:
+                category = channel.category.name if channel.category else "No category"
+                issues.append(f"{channel.mention} · `{category}`\nMissing: {', '.join(missing)}")
+
+        if not issues:
+            await ctx.send(embed=ok_embed("Permission Scan", "No obvious channel permission issues found."))
+            return
+
+        await ctx.send(embed=embed("Permission Issues", trim("\n\n".join(issues[:15]), 3900), color=discord.Color.gold()))
+
+    @mcore.group(name="importgroups", invoke_without_command=True)
+    async def importgroups(self, ctx):
+        """Preview/apply dashed role group import."""
+        if not await require_admin(ctx):
+            return
+
+        await ctx.send(embed=embed("Import Role Groups", "Use `!mcore importgroups preview` first, then `!mcore importgroups apply`."))
+
+    @importgroups.command(name="preview")
+    async def importgroups_preview(self, ctx):
+        """Preview detected role groups without saving."""
+        if not await require_admin(ctx):
+            return
+
+        sections = self.parse_role_sections(ctx.guild)
+        e = embed("Role Group Import Preview", self.section_summary(ctx.guild, sections))
+        e.add_field(name="Safety", value="Nothing has been saved yet. Run `!mcore importgroups apply` to save these role IDs.", inline=False)
+
+        await ctx.send(embed=e)
+
+    @importgroups.command(name="apply")
+    async def importgroups_apply(self, ctx):
+        """Save detected role groups by role ID."""
+        if not await require_admin(ctx):
+            return
+
+        sections = self.parse_role_sections(ctx.guild)
+
+        if not sections:
+            await ctx.send(embed=error_embed("No role groups found", "No dashed role headers were detected."))
+            return
+
+        await self.save_sections(ctx.guild, sections)
+
+        e = ok_embed("Role groups imported", f"Saved `{len(sections)}` role groups by role ID.")
+        e.add_field(name="Saved groups", value="\n".join(f"• {name} — {len(ids)} roles" for name, ids in sections.items()), inline=False)
+
+        await ctx.send(embed=e)
+
+    @mcore.command(name="suggest")
+    async def suggest(self, ctx):
+        """Suggest next safe setup steps."""
+        if not await require_admin(ctx):
+            return
+
+        sections = self.parse_role_sections(ctx.guild)
+        saved = await self.saved_sections(ctx.guild)
+
+        e = embed("Suggested Systems Setup")
+        e.description = "Read-only suggestions. Nothing is changed automatically."
+
+        e.add_field(
+            name="Detected role groups",
+            value="\n".join(f"• {name} — {len(ids)} roles" for name, ids in sections.items()) or "No role groups detected.",
+            inline=False,
+        )
+        e.add_field(
+            name="Saved role groups",
+            value="\n".join(f"• {name} — {len(ids)} roles" for name, ids in saved.items()) or "No role groups saved yet.",
+            inline=False,
+        )
+        e.add_field(
+            name="Next",
+            value="Run `!mcore importgroups preview`, then `!mcore importgroups apply` if it looks correct.",
+            inline=False,
+        )
 
         await ctx.send(embed=e)
 

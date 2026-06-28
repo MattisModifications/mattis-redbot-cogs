@@ -9,6 +9,7 @@ from .shared_mattis import (
     embed,
     require_staff,
     require_admin,
+    require_development,
     request_json,
     get_core_config,
     fmt_payload,
@@ -87,7 +88,7 @@ class MattisStatus(commands.Cog):
 
     @mstatus.command(name="database", aliases=["redis", "workers", "pm2"])
     async def admin_snapshot(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_development(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/systems/counts")

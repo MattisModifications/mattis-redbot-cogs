@@ -4,6 +4,7 @@ from .shared_mattis import (
     embed,
     request_json,
     require_admin,
+    require_billing,
     simple_counts_embed,
     line_list,
     invoice_line,
@@ -20,13 +21,13 @@ class MattisBilling(commands.Cog):
 
     @commands.group(name="mbilling", invoke_without_command=True)
     async def mbilling(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
         await self.summary(ctx)
 
     @mbilling.command(name="summary")
     async def summary(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/billing/summary")
@@ -39,7 +40,7 @@ class MattisBilling(commands.Cog):
 
     @mbilling.command(name="failed")
     async def failed(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/billing/failed")
@@ -47,7 +48,7 @@ class MattisBilling(commands.Cog):
 
     @mbilling.command(name="trials")
     async def trials(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/billing/trials")
@@ -55,7 +56,7 @@ class MattisBilling(commands.Cog):
 
     @mbilling.command(name="pastdue")
     async def pastdue(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/billing/pastdue")
@@ -63,7 +64,7 @@ class MattisBilling(commands.Cog):
 
     @mbilling.command(name="customer")
     async def customer(self, ctx, *, query: str):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/billing/customer?q={q(query)}")
@@ -80,7 +81,7 @@ class MattisBilling(commands.Cog):
 
     @mbilling.command(name="invoices")
     async def invoices(self, ctx, *, query: str = ""):
-        if not await require_admin(ctx):
+        if not await require_billing(ctx):
             return
 
         if query:

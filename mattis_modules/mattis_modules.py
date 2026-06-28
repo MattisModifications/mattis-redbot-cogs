@@ -1,6 +1,7 @@
 from redbot.core import commands
 
-from .shared_mattis import request_json, require_staff, require_admin, simple_counts_embed
+from .shared_mattis import request_json, require_staff, require_admin,
+    require_development, simple_counts_embed
 
 
 class MattisModules(commands.Cog):
@@ -25,7 +26,7 @@ class MattisModules(commands.Cog):
 
     @mmodules.command(name="flags", aliases=["developer"])
     async def admin(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_development(ctx):
             return
 
         await self.summary(ctx)

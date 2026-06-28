@@ -4,6 +4,7 @@ from .shared_mattis import (
     embed,
     request_json,
     require_admin,
+    require_security,
     line_list,
     audit_line,
     q,
@@ -18,13 +19,13 @@ class MattisAudit(commands.Cog):
 
     @commands.group(name="maudit", invoke_without_command=True)
     async def maudit(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
         await self.recent(ctx)
 
     @maudit.command(name="recent")
     async def recent(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/audit/recent")
@@ -37,7 +38,7 @@ class MattisAudit(commands.Cog):
 
     @maudit.command(name="highrisk")
     async def highrisk(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/audit/highrisk")
@@ -45,7 +46,7 @@ class MattisAudit(commands.Cog):
 
     @maudit.command(name="search")
     async def search(self, ctx, *, query: str):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/audit/search?q={q(query)}")
@@ -53,6 +54,6 @@ class MattisAudit(commands.Cog):
 
     @maudit.command(name="billing", aliases=["support", "security", "roblox", "discord"])
     async def filtered(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
         await self.search(ctx, query=ctx.invoked_with)

@@ -4,6 +4,7 @@ from .shared_mattis import (
     embed,
     request_json,
     require_admin,
+    require_security,
     simple_counts_embed,
     line_list,
     user_line,
@@ -19,13 +20,13 @@ class MattisSecurity(commands.Cog):
 
     @commands.group(name="msecurity", invoke_without_command=True)
     async def msecurity(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
         await self.risks(ctx)
 
     @msecurity.command(name="risks")
     async def risks(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/security/risks")
@@ -38,7 +39,7 @@ class MattisSecurity(commands.Cog):
 
     @msecurity.command(name="sessions")
     async def sessions(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/security/sessions")
@@ -46,7 +47,7 @@ class MattisSecurity(commands.Cog):
 
     @msecurity.command(name="admins")
     async def admins(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/security/admins")
@@ -54,7 +55,7 @@ class MattisSecurity(commands.Cog):
 
     @msecurity.command(name="suspicious")
     async def suspicious(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/security/suspicious")
@@ -62,7 +63,7 @@ class MattisSecurity(commands.Cog):
 
     @msecurity.command(name="user")
     async def user(self, ctx, *, query: str):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={q(query)}")
@@ -70,6 +71,6 @@ class MattisSecurity(commands.Cog):
 
     @msecurity.command(name="failedlogins", aliases=["permissions", "tokens", "config"])
     async def placeholder(self, ctx):
-        if not await require_admin(ctx):
+        if not await require_security(ctx):
             return
         await self.risks(ctx)

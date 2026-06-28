@@ -21,7 +21,13 @@ WARN = discord.Color.gold()
 async def get_core_config(bot) -> Config:
     cfg = Config.get_conf(bot, identifier=IDENTIFIER, force_registration=True)
     cfg.register_global(api_url="", api_token="")
-    cfg.register_guild(systems_channels={}, staff_roles=[], admin_roles=[])
+    cfg.register_guild(
+        systems_channels={},
+        staff_roles=[],
+        admin_roles=[],
+        role_groups={},
+        role_sections={},
+    )
     return cfg
 
 
@@ -32,6 +38,17 @@ def q(value: str) -> str:
 def trim(value: Any, limit: int = 1000) -> str:
     text = str(value) if value is not None else "—"
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def pretty_key(value: Any) -> str:
+    text = str(value)
+    text = re.sub(r"(?<!^)(?=[A-Z])", " ", text)
+    text = text.replace("_", " ").replace("-", " ")
+    return " ".join(part.capitalize() for part in text.split())
+
+
+def norm(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
 
 
 def embed(title: str, description: str | None = None, *, color: discord.Color = BRAND) -> discord.Embed:
@@ -48,13 +65,6 @@ def ok_embed(title: str, message: str | None = None) -> discord.Embed:
     return embed(title, message, color=OK)
 
 
-def pretty_key(value: Any) -> str:
-    text = str(value)
-    text = re.sub(r"(?<!^)(?=[A-Z])", " ", text)
-    text = text.replace("_", " ").replace("-", " ")
-    return " ".join(part.capitalize() for part in text.split())
-
-
 def add_fields(e: discord.Embed, data: dict[str, Any], *, inline: bool = True, max_fields: int = 20) -> discord.Embed:
     added = 0
     for key, value in data.items():
@@ -62,15 +72,11 @@ def add_fields(e: discord.Embed, data: dict[str, Any], *, inline: bool = True, m
             break
 
         if isinstance(value, dict):
-            value = ", ".join(f"{k}: {v}" for k, v in value.items())
+            value = ", ".join(f"{pretty_key(k)}: {v}" for k, v in value.items())
         elif isinstance(value, list):
             value = ", ".join(map(str, value[:8])) if value else "—"
 
-        e.add_field(
-            name=pretty_key(key),
-            value=trim(value, 1024),
-            inline=inline,
-        )
+        e.add_field(name=pretty_key(key), value=trim(value, 1024), inline=inline)
         added += 1
 
     return e
@@ -120,7 +126,7 @@ async def request_json(
 
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Mattis-CMS-Systems/2.0",
+        "User-Agent": "Mattis-CMS-Systems/3.0",
     }
 
     if token:
@@ -137,33 +143,79 @@ async def request_json(
                 return resp.status, text
 
 
-async def api_embed(
-    bot,
-    title: str,
-    method: str,
-    path: str,
-    *,
-    payload_formatter=None,
-    json_body: Optional[dict[str, Any]] = None,
-) -> discord.Embed:
-    try:
-        started = time.perf_counter()
-        status, payload = await request_json(bot, method, path, json_body=json_body)
-        latency = round((time.perf_counter() - started) * 1000)
+async def get_role_sections(ctx) -> dict[str, list[int]]:
+    cfg = await get_core_config(ctx.bot)
+    sections = await cfg.guild(ctx.guild).role_sections()
+    sections = sections or {}
 
-        if status >= 400:
-            return error_embed(f"{title} → HTTP {status}", fmt_payload(payload))
+    old_groups = await cfg.guild(ctx.guild).role_groups()
+    old_groups = old_groups or {}
 
-        if payload_formatter:
-            e = payload_formatter(payload)
-        else:
-            e = embed(title, fmt_payload(payload))
+    legacy_map = {
+        "support": "Support Team",
+        "moderation": "Moderation & Support",
+        "staff": "Staff",
+        "management": "Management",
+        "admin": "Administration Team",
+        "development": "Development Team",
+    }
 
-        e.add_field(name="API", value=f"HTTP {status} · {latency}ms", inline=False)
-        return e
+    for key, section_name in legacy_map.items():
+        for rid in old_groups.get(key, []) or []:
+            sections.setdefault(section_name, [])
+            if rid not in sections[section_name]:
+                sections[section_name].append(rid)
 
-    except Exception as exc:
-        return error_embed(title, f"{type(exc).__name__}: {exc}")
+    old_staff = await cfg.guild(ctx.guild).staff_roles()
+    old_admin = await cfg.guild(ctx.guild).admin_roles()
+
+    for rid in old_staff or []:
+        sections.setdefault("Staff", [])
+        if rid not in sections["Staff"]:
+            sections["Staff"].append(rid)
+
+    for rid in old_admin or []:
+        sections.setdefault("Administration Team", [])
+        if rid not in sections["Administration Team"]:
+            sections["Administration Team"].append(rid)
+
+    return sections
+
+
+def member_role_ids(ctx) -> set[int]:
+    return {role.id for role in getattr(ctx.author, "roles", [])}
+
+
+def member_role_names(ctx) -> list[str]:
+    return [role.name for role in getattr(ctx.author, "roles", [])]
+
+
+async def member_in_sections(ctx, section_keywords: list[str]) -> bool:
+    if not ctx.guild:
+        return False
+
+    sections = await get_role_sections(ctx)
+    author_roles = member_role_ids(ctx)
+    wanted_keywords = [norm(k) for k in section_keywords]
+
+    for section_name, role_ids in sections.items():
+        section_norm = norm(section_name)
+        if any(key in section_norm for key in wanted_keywords):
+            if author_roles.intersection(set(role_ids or [])):
+                return True
+
+    return False
+
+
+async def member_has_role_keywords(ctx, role_keywords: list[str]) -> bool:
+    wanted = [norm(k) for k in role_keywords]
+
+    for role_name in member_role_names(ctx):
+        role_norm = norm(role_name)
+        if any(key in role_norm for key in wanted):
+            return True
+
+    return False
 
 
 async def is_admin(ctx) -> bool:
@@ -176,15 +228,89 @@ async def is_admin(ctx) -> bool:
     if ctx.author.guild_permissions.administrator:
         return True
 
-    cfg = await get_core_config(ctx.bot)
-    admin_roles = await cfg.guild(ctx.guild).admin_roles()
-    author_roles = {role.id for role in getattr(ctx.author, "roles", [])}
+    if await member_has_role_keywords(ctx, ["founder", "owner"]):
+        return True
 
-    return bool(author_roles.intersection(set(admin_roles or [])))
+    if await member_in_sections(ctx, ["administration"]):
+        return True
+
+    return False
+
+
+async def is_management(ctx) -> bool:
+    if await is_admin(ctx):
+        return True
+
+    if await member_in_sections(ctx, ["management"]):
+        return True
+
+    return False
+
+
+async def is_administration(ctx) -> bool:
+    if await is_management(ctx):
+        return True
+
+    if await member_in_sections(ctx, ["administration"]):
+        return True
+
+    if await member_has_role_keywords(ctx, ["administrator", "infrastructureadmin", "securityadmin"]):
+        return True
+
+    return False
+
+
+async def is_development(ctx) -> bool:
+    if await is_administration(ctx):
+        return True
+
+    if await member_in_sections(ctx, ["development"]):
+        return True
+
+    if await member_has_role_keywords(ctx, ["developer", "qtester", "qatester", "releasemanager", "designer"]):
+        return True
+
+    return False
+
+
+async def is_support(ctx) -> bool:
+    if await is_management(ctx):
+        return True
+
+    if await member_in_sections(ctx, ["support", "moderation"]):
+        return True
+
+    if await member_has_role_keywords(ctx, ["support", "moderator", "incidentresponse", "auditreviewer"]):
+        return True
+
+    return False
+
+
+async def is_billing(ctx) -> bool:
+    if await is_management(ctx):
+        return True
+
+    if await member_has_role_keywords(ctx, ["billingsupport", "billing"]):
+        return True
+
+    return False
+
+
+async def is_security(ctx) -> bool:
+    if await is_administration(ctx):
+        return True
+
+    if await member_has_role_keywords(ctx, ["security", "incidentresponse", "auditreviewer", "seniormoderator"]):
+        return True
+
+    if await member_in_sections(ctx, ["moderation"]):
+        return True
+
+    return False
 
 
 async def is_staff(ctx) -> bool:
-    if await is_admin(ctx):
+    if await is_management(ctx) or await is_development(ctx) or await is_support(ctx):
         return True
 
     if not ctx.guild:
@@ -193,11 +319,7 @@ async def is_staff(ctx) -> bool:
     if ctx.author.guild_permissions.manage_guild:
         return True
 
-    cfg = await get_core_config(ctx.bot)
-    staff_roles = await cfg.guild(ctx.guild).staff_roles()
-    author_roles = {role.id for role in getattr(ctx.author, "roles", [])}
-
-    return bool(author_roles.intersection(set(staff_roles or [])))
+    return False
 
 
 async def require_staff(ctx) -> bool:
@@ -206,7 +328,18 @@ async def require_staff(ctx) -> bool:
 
     await ctx.send(embed=error_embed(
         "Permission denied",
-        "You need a Mattis Systems staff role or Manage Server permission.",
+        "You need a Mattis Systems staff, support, moderation, development, management, or admin role.",
+    ))
+    return False
+
+
+async def require_management(ctx) -> bool:
+    if await is_management(ctx):
+        return True
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        "You need a Mattis Systems management/admin role.",
     ))
     return False
 
@@ -218,6 +351,39 @@ async def require_admin(ctx) -> bool:
     await ctx.send(embed=error_embed(
         "Permission denied",
         "You need a Mattis Systems admin role or Administrator permission.",
+    ))
+    return False
+
+
+async def require_development(ctx) -> bool:
+    if await is_development(ctx):
+        return True
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        "You need Development Team, Administration Team, Management, or Admin access.",
+    ))
+    return False
+
+
+async def require_billing(ctx) -> bool:
+    if await is_billing(ctx):
+        return True
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        "You need Billing Support, Management, or Admin access.",
+    ))
+    return False
+
+
+async def require_security(ctx) -> bool:
+    if await is_security(ctx):
+        return True
+
+    await ctx.send(embed=error_embed(
+        "Permission denied",
+        "You need Security/Moderation/Audit/Incident, Administration, Management, or Admin access.",
     ))
     return False
 
@@ -264,7 +430,6 @@ def staff_line(s: dict[str, Any]) -> str:
 
 def simple_counts_embed(title: str, payload: dict[str, Any]) -> discord.Embed:
     e = embed(title)
-
     counts = payload.get("counts", payload) if isinstance(payload, dict) else {}
 
     if isinstance(counts, dict):
