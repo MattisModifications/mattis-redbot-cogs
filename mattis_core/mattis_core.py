@@ -618,6 +618,7 @@ class MattisCore(commands.Cog):
             "healthy": failed == 0,
         }
 
+
     def b5_score_readiness(self, checks: list[dict], security: dict, prod_state: dict) -> dict:
         summary = self.b5_endpoint_summary(checks)
 
@@ -635,6 +636,16 @@ class MattisCore(commands.Cog):
 
         highrisk_count = int(security.get("highrisk_events", 0) or 0)
         secret_events = int(security.get("secret_events", 0) or 0)
+        active_incidents = int(security.get("active_incidents", 0) or 0)
+        active_critical_high = int(security.get("active_critical_high_incidents", 0) or 0)
+
+        if active_critical_high:
+            score -= min(35, active_critical_high * 15)
+            blockers.append(f"{active_critical_high} active critical/high incident(s) are open.")
+
+        elif active_incidents:
+            score -= min(10, active_incidents * 3)
+            warnings.append(f"{active_incidents} active incident(s) are open.")
 
         if highrisk_count >= 20:
             score -= 10
@@ -671,9 +682,16 @@ class MattisCore(commands.Cog):
             "actors": [],
             "categories": [],
             "top_reasons": [],
+            "active_incidents": 0,
+            "active_critical_high_incidents": 0,
         }
 
         try:
+            if hasattr(self, "b8_active_incident_summary"):
+                inc_summary = await self.b8_active_incident_summary(guild)
+                result["active_incidents"] = int(inc_summary.get("open", 0) or 0)
+                result["active_critical_high_incidents"] = int(inc_summary.get("active_critical_high", 0) or 0)
+
             if not hasattr(self, "b4a_fetch_highrisk_events"):
                 return result
 
@@ -1413,6 +1431,276 @@ class MattisCore(commands.Cog):
             "- Raw infrastructure details",
         ]
 
+
+    def b8_incident_counts(self, incidents: dict) -> dict:
+        counts = {
+            "total": 0,
+            "open": 0,
+            "resolved": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "active_critical_high": 0,
+        }
+
+        for _, inc in (incidents or {}).items():
+            counts["total"] += 1
+            status = str(inc.get("status", "open")).lower()
+            sev = self.b7_severity_normalise(inc.get("severity", "medium"))
+
+            counts[sev] = counts.get(sev, 0) + 1
+
+            if status == "resolved":
+                counts["resolved"] += 1
+            else:
+                counts["open"] += 1
+
+                if sev in ["critical", "high"]:
+                    counts["active_critical_high"] += 1
+
+        return counts
+
+    async def b8_active_incident_summary(self, guild) -> dict:
+        if not hasattr(self, "b7_get_incident_state"):
+            return {
+                "total": 0,
+                "open": 0,
+                "resolved": 0,
+                "critical": 0,
+                "high": 0,
+                "medium": 0,
+                "low": 0,
+                "active_critical_high": 0,
+                "items": [],
+            }
+
+        state = await self.b7_get_incident_state(guild)
+        incidents = state.get("incidents") or {}
+        counts = self.b8_incident_counts(incidents)
+
+        active = [(k, v) for k, v in incidents.items() if str(v.get("status", "open")).lower() != "resolved"]
+
+        if hasattr(self, "b7_incident_sort_key"):
+            active.sort(key=self.b7_incident_sort_key)
+
+        counts["items"] = active
+        return counts
+
+    def b8_incident_sla_minutes(self, severity: str) -> dict:
+        severity = self.b7_severity_normalise(severity)
+
+        if severity == "critical":
+            return {"update": 15, "review": 60}
+        if severity == "high":
+            return {"update": 30, "review": 120}
+        if severity == "medium":
+            return {"update": 120, "review": 480}
+
+        return {"update": 240, "review": 1440}
+
+    def b8_parse_iso(self, value):
+        from datetime import datetime, timezone
+
+        if not value:
+            return None
+
+        try:
+            value = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(value)
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            return dt
+        except Exception:
+            return None
+
+    def b8_minutes_since(self, iso_value) -> int:
+        from datetime import datetime, timezone
+
+        dt = self.b8_parse_iso(iso_value)
+
+        if not dt:
+            return 0
+
+        return max(0, int((datetime.now(timezone.utc) - dt).total_seconds() // 60))
+
+    def b8_incident_sla_status(self, inc: dict) -> dict:
+        sev = self.b7_severity_normalise(inc.get("severity", "medium"))
+        status = str(inc.get("status", "open")).lower()
+        sla = self.b8_incident_sla_minutes(sev)
+        since_update = self.b8_minutes_since(inc.get("updated_at") or inc.get("created_at"))
+
+        overdue = status != "resolved" and since_update >= sla["update"]
+
+        return {
+            "severity": sev,
+            "status": status,
+            "update_sla_minutes": sla["update"],
+            "review_sla_minutes": sla["review"],
+            "minutes_since_update": since_update,
+            "overdue": overdue,
+            "label": "Resolved" if status == "resolved" else "Update overdue" if overdue else "Within update SLA",
+        }
+
+    def b8_status_card_lines(self, incident_id: str, inc: dict) -> list[str]:
+        sev = self.b7_severity_normalise(inc.get("severity", "medium"))
+        sla = self.b8_incident_sla_status(inc)
+        title = inc.get("title") or incident_id
+        status = str(inc.get("status", "open")).title()
+
+        lines = [
+            f"{self.b7_status_emoji(inc.get('status'))} {self.b7_severity_emoji(sev)} **{incident_id} — {title}**",
+            f"Severity: `{sev.title()}`",
+            f"Status: `{status}`",
+            f"Commander: `{inc.get('commander') or 'Not assigned'}`",
+            f"Owner: `{inc.get('owner') or 'Unassigned'}`",
+            f"SLA: `{sla['label']}` | Last update: `{sla['minutes_since_update']} min ago` | Update SLA: `{sla['update_sla_minutes']} min`",
+            "",
+            "**Customer impact:**",
+            inc.get("customer_impact") or inc.get("impact") or "Customer impact not confirmed.",
+            "",
+            "**Internal impact:**",
+            inc.get("internal_impact") or "Internal impact not documented.",
+            "",
+            "**Current status:**",
+            inc.get("current_status") or "No current status.",
+            "",
+            "**Next action:**",
+            inc.get("next_action") or "No next action set.",
+        ]
+
+        if inc.get("linked_alert"):
+            lines.append(f"Linked alert: `{inc.get('linked_alert')}`")
+
+        if inc.get("linked_log_query"):
+            lines.append(f"Linked log query: `{inc.get('linked_log_query')}`")
+
+        return lines
+
+    def b8_closeout_lines(self, incident_id: str, inc: dict) -> list[str]:
+        status = str(inc.get("status", "open")).lower()
+
+        checks = [
+            ("Incident resolved", status == "resolved"),
+            ("Impact documented", bool(inc.get("impact") or inc.get("customer_impact"))),
+            ("Internal impact documented", bool(inc.get("internal_impact"))),
+            ("Current status documented", bool(inc.get("current_status"))),
+            ("Resolution documented", bool(inc.get("resolution"))),
+            ("Owner or commander assigned", bool(inc.get("owner") and inc.get("owner") != "Unassigned") or bool(inc.get("commander"))),
+            ("Timeline has at least 2 entries", len(inc.get("timeline") or []) >= 2),
+            ("Next action documented or resolved", bool(inc.get("next_action")) or status == "resolved"),
+        ]
+
+        passed = sum(1 for _, ok in checks if ok)
+        total = len(checks)
+
+        lines = [
+            f"**Closeout checklist for `{incident_id}`**",
+            f"Score: `{passed}/{total}`",
+            "",
+        ]
+
+        for label, ok in checks:
+            lines.append(f"{'✅' if ok else '☐'} {label}")
+
+        lines.extend([
+            "",
+            "**Recommended closeout flow:**",
+            f"`!mcore incident impact {incident_id} <customer/internal impact>`",
+            f"`!mcore incident internal-impact {incident_id} <internal impact>`",
+            f"`!mcore incident resolve {incident_id} <resolution>`",
+            f"`!mcore incident postmortem {incident_id}`",
+            f"`!mcore incident export {incident_id}`",
+        ])
+
+        return lines
+
+    def b8_notify_lines(self, incident_id: str, inc: dict, mode: str) -> list[str]:
+        mode = str(mode or "internal").lower().strip()
+        title = inc.get("title") or incident_id
+        sev = self.b7_severity_normalise(inc.get("severity", "medium")).title()
+        status = str(inc.get("status", "open")).title()
+        current = inc.get("current_status") or "Investigation is ongoing."
+        customer = inc.get("customer_impact") or inc.get("impact") or "Impact is being assessed."
+        next_action = inc.get("next_action") or "The team is continuing investigation and monitoring."
+
+        if mode == "resolved":
+            return [
+                f"**Resolved update — `{incident_id}`**",
+                f"`{sev}` incident **{title}** is now resolved.",
+                "",
+                f"Resolution: {inc.get('resolution') or 'Resolution details are being finalised.'}",
+                f"Impact: {customer}",
+                "",
+                "Monitoring will continue and follow-up actions will be documented internally.",
+            ]
+
+        if mode == "customer":
+            return [
+                f"**Customer-safe update — `{incident_id}`**",
+                "",
+                f"We are currently reviewing an issue affecting part of the service.",
+                f"Status: {status}.",
+                f"Impact: {customer}",
+                "",
+                "We will continue monitoring and provide further updates as needed.",
+            ]
+
+        return [
+            f"**Internal incident update — `{incident_id}`**",
+            f"Severity: `{sev}`",
+            f"Status: `{status}`",
+            f"Title: {title}",
+            "",
+            f"Current status: {current}",
+            f"Customer impact: {customer}",
+            f"Internal impact: {inc.get('internal_impact') or 'Not documented.'}",
+            f"Next action: {next_action}",
+            f"Commander: `{inc.get('commander') or 'Not assigned'}`",
+            f"Owner: `{inc.get('owner') or 'Unassigned'}`",
+        ]
+
+    def b8_improved_incident_classification(self, events: list[dict]) -> dict:
+        severity = self.b4mega_overall_severity(events) if hasattr(self, "b4mega_overall_severity") else "high"
+        areas = self.b4mega_affected_areas(events) if hasattr(self, "b4mega_affected_areas") else ["Operations"]
+
+        customer_bits = []
+        internal_bits = []
+
+        if "Billing / Stripe" in areas:
+            customer_bits.append("Possible customer impact if Stripe billing, webhook delivery, subscriptions, invoices, or customer access were disrupted.")
+            internal_bits.append("Billing and Stripe webhook configuration should be verified.")
+
+        if "Roblox Integration" in areas:
+            customer_bits.append("Possible customer impact if Roblox verification, sync, or product integrations were disrupted.")
+            internal_bits.append("Roblox OAuth/Open Cloud/webhook configuration should be verified.")
+
+        if "Discord OAuth / Bot Integration" in areas:
+            customer_bits.append("Possible login/support impact if Discord OAuth or bot integrations were disrupted.")
+            internal_bits.append("Discord OAuth and bot command health should be verified.")
+
+        if "Secrets / Tokens / Webhooks" in areas:
+            internal_bits.append("Sensitive secret/token/webhook configuration changed and requires access/rotation review.")
+
+        if "Entitlements / Access Matrix" in areas:
+            customer_bits.append("Possible access impact if entitlement changes affected customer or staff permissions.")
+            internal_bits.append("Entitlement/access matrix changes should be reviewed.")
+
+        if not customer_bits:
+            customer_bits.append("No confirmed customer impact from audit evidence alone.")
+
+        if not internal_bits:
+            internal_bits.append("Internal operational review required.")
+
+        return {
+            "severity": severity,
+            "areas": areas,
+            "customer_impact": " ".join(customer_bits),
+            "internal_impact": " ".join(internal_bits),
+        }
+
     @mcore.group(name="incident", invoke_without_command=True)
     async def incident(self, ctx):
         """Incident command centre."""
@@ -1442,6 +1730,376 @@ class MattisCore(commands.Cog):
         ]
 
         await self.send_paginated(ctx, "Incident Command", lines)
+
+
+    @incident.command(name="active")
+    async def incident_active(self, ctx):
+        """Show active incidents."""
+        if not await require_admin(ctx):
+            return
+
+        summary = await self.b8_active_incident_summary(ctx.guild)
+        items = summary.get("items") or []
+
+        lines = [
+            f"Active incidents: `{summary.get('open', 0)}`",
+            f"Active critical/high: `{summary.get('active_critical_high', 0)}`",
+            "",
+        ]
+
+        if not items:
+            lines.append("✅ No active incidents.")
+        else:
+            for incident_id, inc in items[:30]:
+                lines.extend(self.b8_status_card_lines(incident_id, inc))
+                lines.append("")
+
+        await self.send_paginated(ctx, "Active Incidents", lines)
+
+    @incident.command(name="stats")
+    async def incident_stats(self, ctx):
+        """Show incident statistics."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b7_get_incident_state(ctx.guild)
+        incidents = state.get("incidents") or {}
+        counts = self.b8_incident_counts(incidents)
+
+        lines = [
+            f"Total incidents: `{counts['total']}`",
+            f"Open: `{counts['open']}`",
+            f"Resolved: `{counts['resolved']}`",
+            "",
+            f"Critical: `{counts['critical']}`",
+            f"High: `{counts['high']}`",
+            f"Medium: `{counts['medium']}`",
+            f"Low: `{counts['low']}`",
+            "",
+            f"Active critical/high: `{counts['active_critical_high']}`",
+        ]
+
+        await self.send_paginated(ctx, "Incident Stats", lines)
+
+    @incident.command(name="severity")
+    async def incident_severity(self, ctx, query: str, severity: str):
+        """Change incident severity."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        old = inc.get("severity")
+        new = self.b7_severity_normalise(severity)
+        inc["severity"] = new
+        inc = self.b7_add_timeline(inc, "severity_changed", self.b7_actor(ctx), f"Severity changed from {old} to {new}")
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident severity updated", f"`{incident_id}` severity is now `{new}`."))
+
+    @incident.command(name="commander")
+    async def incident_commander(self, ctx, query: str, *, commander: str):
+        """Assign incident commander."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["commander"] = self.b7_safe(commander, 200)
+        inc = self.b7_add_timeline(inc, "commander_assigned", self.b7_actor(ctx), f"Commander set to {commander}")
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident commander assigned", f"`{incident_id}` commander set to `{commander}`."))
+
+    @incident.command(name="customer-impact")
+    async def incident_customer_impact(self, ctx, query: str, *, impact: str):
+        """Set customer impact."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["customer_impact"] = self.b7_safe(impact, 1400)
+        inc["impact"] = inc["customer_impact"]
+        inc = self.b7_add_timeline(inc, "customer_impact_updated", self.b7_actor(ctx), impact)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Customer impact updated", f"`{incident_id}` customer impact updated."))
+
+    @incident.command(name="internal-impact")
+    async def incident_internal_impact(self, ctx, query: str, *, impact: str):
+        """Set internal impact."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["internal_impact"] = self.b7_safe(impact, 1400)
+        inc = self.b7_add_timeline(inc, "internal_impact_updated", self.b7_actor(ctx), impact)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Internal impact updated", f"`{incident_id}` internal impact updated."))
+
+    @incident.command(name="next")
+    async def incident_next(self, ctx, query: str, *, action: str):
+        """Set next action."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["next_action"] = self.b7_safe(action, 1200)
+        inc = self.b7_add_timeline(inc, "next_action_updated", self.b7_actor(ctx), action)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Next action updated", f"`{incident_id}` next action updated."))
+
+    @incident.command(name="status-card")
+    async def incident_status_card(self, ctx, *, query: str):
+        """Show incident status card."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Incident Status Card", self.b8_status_card_lines(incident_id, inc))
+
+    @incident.command(name="closeout")
+    async def incident_closeout(self, ctx, *, query: str):
+        """Show incident closeout checklist."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Incident Closeout", self.b8_closeout_lines(incident_id, inc))
+
+    @incident.command(name="review")
+    async def incident_review(self, ctx, *, query: str):
+        """Review incident quality, SLA, and closeout readiness."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        sla = self.b8_incident_sla_status(inc)
+
+        lines = [
+            f"**Review for `{incident_id}`**",
+            "",
+            f"SLA status: `{sla['label']}`",
+            f"Minutes since update: `{sla['minutes_since_update']}`",
+            f"Update SLA: `{sla['update_sla_minutes']} min`",
+            "",
+        ]
+
+        lines.extend(self.b8_status_card_lines(incident_id, inc))
+        lines.append("")
+        lines.extend(self.b8_closeout_lines(incident_id, inc))
+
+        await self.send_paginated(ctx, "Incident Review", lines)
+
+    @incident.command(name="notify")
+    async def incident_notify(self, ctx, query: str, mode: str = "internal"):
+        """Generate incident notification text."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        lines = self.b8_notify_lines(incident_id, inc, mode)
+        await self.send_paginated(ctx, "Incident Notification", lines)
+
+    @incident.command(name="link-alert")
+    async def incident_link_alert(self, ctx, query: str, *, alert_query: str):
+        """Link incident to an alert."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        alert_key = alert_query
+
+        if hasattr(self, "b3b_find_alert"):
+            try:
+                found_key, found_item = await self.b3b_find_alert(ctx.guild, alert_query)
+                if found_item:
+                    alert_key = found_key
+            except Exception:
+                pass
+
+        inc["linked_alert"] = alert_key
+        inc = self.b7_add_timeline(inc, "linked_alert", self.b7_actor(ctx), f"Linked alert {alert_key}")
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident linked to alert", f"`{incident_id}` linked to `{alert_key}`."))
+
+    @incident.command(name="link-log")
+    async def incident_link_log(self, ctx, query: str, *, log_query: str):
+        """Link incident to log query."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["linked_log_query"] = self.b7_safe(log_query, 240)
+        inc = self.b7_add_timeline(inc, "linked_log", self.b7_actor(ctx), f"Linked log query {log_query}")
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident linked to log query", f"`{incident_id}` linked to log query `{log_query}`."))
+
+    @incident.command(name="sync-alert")
+    async def incident_sync_alert(self, ctx, *, query: str):
+        """Sync incident status from linked alert evidence where possible."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        alert_key = inc.get("linked_alert")
+
+        if not alert_key:
+            await ctx.send(embed=info_embed("No linked alert", f"`{incident_id}` has no linked alert."))
+            return
+
+        alert_item = None
+
+        if hasattr(self, "b3b_find_alert"):
+            try:
+                found_key, alert_item = await self.b3b_find_alert(ctx.guild, alert_key)
+                alert_key = found_key or alert_key
+            except Exception:
+                pass
+
+        if not alert_item:
+            await ctx.send(embed=info_embed("Linked alert unavailable", f"Could not load linked alert `{alert_key}`."))
+            return
+
+        if alert_item.get("assigned_role_name"):
+            inc["owner"] = alert_item.get("assigned_role_name")
+
+        if alert_item.get("customer_impact"):
+            inc["customer_impact"] = alert_item.get("customer_impact")
+            inc["impact"] = alert_item.get("customer_impact")
+
+        if alert_item.get("internal_impact"):
+            inc["internal_impact"] = alert_item.get("internal_impact")
+
+        if alert_item.get("status"):
+            inc["current_status"] = f"Linked alert `{alert_key}` currently reports status `{alert_item.get('status')}`."
+
+        inc = self.b7_add_timeline(inc, "synced_alert", self.b7_actor(ctx), f"Synced fields from linked alert {alert_key}")
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident synced from alert", f"`{incident_id}` synced from `{alert_key}`."))
+
+    @incident.command(name="resolve-linked-alert")
+    async def incident_resolve_linked_alert(self, ctx, query: str, *, note: str = "Incident resolved; linked alert accepted as handled."):
+        """Resolve linked alert when closing an incident."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        alert_key = inc.get("linked_alert")
+
+        if not alert_key:
+            await ctx.send(embed=info_embed("No linked alert", f"`{incident_id}` has no linked alert."))
+            return
+
+        if not hasattr(self, "b3b_find_alert") or not hasattr(self, "b3b_save_alert_item"):
+            await ctx.send(embed=error_embed("Alert lifecycle unavailable", "Alert lifecycle helpers are not available."))
+            return
+
+        found_key, alert_item = await self.b3b_find_alert(ctx.guild, alert_key)
+
+        if not alert_item:
+            await ctx.send(embed=info_embed("Linked alert unavailable", f"Could not find linked alert `{alert_key}`."))
+            return
+
+        alert_item["status"] = "resolved"
+        alert_item["resolved"] = True
+        alert_item["resolved_by"] = str(ctx.author)
+        alert_item["resolved_at"] = self.b7_now_iso()
+
+        if hasattr(self, "b3b_add_timeline"):
+            alert_item = self.b3b_add_timeline(alert_item, "resolved_from_incident", self.b7_actor(ctx), f"{incident_id}: {note}")
+
+        await self.b3b_save_alert_item(ctx.guild, found_key, alert_item)
+
+        inc = self.b7_add_timeline(inc, "resolved_linked_alert", self.b7_actor(ctx), f"Resolved linked alert {found_key}: {note}")
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Linked alert resolved", f"`{found_key}` resolved from incident `{incident_id}`."))
 
     @incident.command(name="open")
     async def incident_open(self, ctx, severity: str, *, title: str):
@@ -8022,7 +8680,11 @@ class MattisCore(commands.Cog):
 
         return lines
 
+
     def b4mega_incident_classification(self, events: list[dict]) -> dict:
+        if hasattr(self, "b8_improved_incident_classification"):
+            return self.b8_improved_incident_classification(events)
+
         severity = self.b4mega_overall_severity(events)
         areas = self.b4mega_affected_areas(events)
 
