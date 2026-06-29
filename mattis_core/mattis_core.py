@@ -2706,6 +2706,581 @@ class MattisCore(commands.Cog):
         return lines
 
 
+
+    def b3e_redact_payload(self, obj):
+        """Redact secret-looking payload values while keeping useful evidence keys/reasons."""
+        import re
+
+        secret_key_words = [
+            "secret",
+            "token",
+            "password",
+            "private",
+            "api_key",
+            "apikey",
+            "access_key",
+            "refresh",
+            "session",
+        ]
+
+        if isinstance(obj, dict):
+            cleaned = {}
+
+            for key, value in obj.items():
+                key_s = str(key)
+                key_l = key_s.lower()
+
+                if any(word in key_l for word in secret_key_words):
+                    # Keep the key name so staff know what changed, but never expose the value.
+                    cleaned[key_s] = "<redacted>"
+                else:
+                    cleaned[key_s] = self.b3e_redact_payload(value)
+
+            return cleaned
+
+        if isinstance(obj, list):
+            return [self.b3e_redact_payload(x) for x in obj[:25]]
+
+        if isinstance(obj, str):
+            value = obj
+
+            # Do not hide useful reason labels like "Updated billing.stripe_secret_key".
+            value = re.sub(r"\b(sk_live|sk_test|pk_live|pk_test|xoxb|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_\-]{8,}\b", "<secret>", value)
+            value = re.sub(r"\b[A-Za-z0-9+/]{90,}={0,2}\b", "<secret>", value)
+
+            return value
+
+        return obj
+
+    def b3e_json_preview(self, obj, limit: int = 1600) -> str:
+        import json
+
+        try:
+            safe = self.b3e_redact_payload(obj)
+            text = json.dumps(safe, indent=2, ensure_ascii=False)
+        except Exception:
+            text = str(obj)
+
+        if len(text) > limit:
+            text = text[:limit] + "\n... <truncated>"
+
+        return text
+
+    def b3e_build_evidence_from_payload(self, payload, *, endpoint: str = "", api_status: str = "", route: str = "", source: str = "api") -> dict:
+        """Build a useful evidence summary from API JSON/text/embed payload."""
+        import json
+
+        original_payload = payload
+        parsed = None
+
+        if isinstance(payload, (dict, list)):
+            parsed = payload
+        elif isinstance(payload, str):
+            text = payload.strip()
+
+            # Remove code fences if present.
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:].strip()
+
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+
+        evidence = {
+            "source": source,
+            "endpoint": endpoint or "",
+            "api_status": api_status or "",
+            "route": route or "",
+            "issue_count": None,
+            "event_count": None,
+            "actions": [],
+            "risk_levels": [],
+            "reasons": [],
+            "actor_user_ids": [],
+            "newest_event_time": "",
+            "sample_events": [],
+            "summary": "",
+            "payload_preview": "",
+        }
+
+        if parsed is None:
+            evidence["payload_preview"] = self.b3e_json_preview(str(original_payload), 1200)
+            evidence["summary"] = "Evidence payload was not valid JSON, so only a safe text preview is available."
+            return evidence
+
+        safe = self.b3e_redact_payload(parsed)
+        evidence["payload_preview"] = self.b3e_json_preview(safe, 1800)
+
+        # Common count keys.
+        if isinstance(safe, dict):
+            for key in ["count", "issueCount", "issue_count", "total", "totalCount", "total_count"]:
+                if key in safe:
+                    try:
+                        evidence["issue_count"] = int(safe.get(key))
+                        break
+                    except Exception:
+                        pass
+
+        # Find event-like arrays.
+        events = []
+
+        if isinstance(safe, dict):
+            for key in ["events", "items", "results", "data", "alerts", "logs"]:
+                value = safe.get(key)
+                if isinstance(value, list):
+                    events = value
+                    break
+
+        elif isinstance(safe, list):
+            events = safe
+
+        if evidence["issue_count"] is None:
+            evidence["issue_count"] = len(events) if events else 1
+
+        evidence["event_count"] = len(events) if events else evidence["issue_count"]
+
+        actions = []
+        risk_levels = []
+        reasons = []
+        actor_ids = []
+        times = []
+        sample_events = []
+
+        for event in events[:8]:
+            if not isinstance(event, dict):
+                continue
+
+            action = event.get("action") or event.get("type") or event.get("event") or ""
+            risk = event.get("riskLevel") or event.get("risk") or event.get("severity") or ""
+            reason = event.get("reason") or event.get("message") or event.get("description") or ""
+            actor = event.get("actorUserId") or event.get("actorId") or event.get("actor") or event.get("userId") or ""
+            created = event.get("createdAt") or event.get("timestamp") or event.get("time") or ""
+
+            if action and action not in actions:
+                actions.append(str(action))
+            if risk and risk not in risk_levels:
+                risk_levels.append(str(risk))
+            if reason and reason not in reasons:
+                reasons.append(str(reason))
+            if actor and actor not in actor_ids:
+                actor_ids.append(str(actor))
+            if created:
+                times.append(str(created))
+
+            sample_events.append({
+                "id": str(event.get("id", ""))[:80],
+                "actor": str(actor)[:80],
+                "action": str(action)[:160],
+                "risk": str(risk)[:80],
+                "reason": str(reason)[:220],
+                "createdAt": str(created)[:80],
+            })
+
+        if times:
+            try:
+                evidence["newest_event_time"] = sorted(times, reverse=True)[0]
+            except Exception:
+                evidence["newest_event_time"] = times[0]
+
+        evidence["actions"] = actions[:8]
+        evidence["risk_levels"] = risk_levels[:6]
+        evidence["reasons"] = reasons[:8]
+        evidence["actor_user_ids"] = actor_ids[:8]
+        evidence["sample_events"] = sample_events[:8]
+
+        parts = []
+
+        if evidence.get("endpoint"):
+            parts.append(f"Endpoint `{evidence['endpoint']}`")
+        if evidence.get("api_status"):
+            parts.append(f"API `{evidence['api_status']}`")
+        if evidence.get("issue_count") is not None:
+            parts.append(f"{evidence['issue_count']} issue(s)")
+        if actions:
+            parts.append("actions: " + ", ".join(actions[:3]))
+        if risk_levels:
+            parts.append("risk: " + ", ".join(risk_levels[:3]))
+        if reasons:
+            parts.append("latest reasons include: " + "; ".join(reasons[:3]))
+
+        evidence["summary"] = " • ".join(parts) if parts else "Evidence captured from the alert payload."
+
+        return evidence
+
+    def b3e_extract_embed_evidence(self, embed=None, content=None) -> dict:
+        """Extract evidence fields from the original alert embed."""
+        fields = {}
+        payload_preview = ""
+
+        if content:
+            fields["content"] = str(content)
+
+        if embed is not None:
+            try:
+                if getattr(embed, "title", None):
+                    fields["title"] = str(embed.title)
+
+                if getattr(embed, "description", None):
+                    fields["description"] = str(embed.description)
+
+                for field in getattr(embed, "fields", []) or []:
+                    name = str(getattr(field, "name", "") or "").strip().lower()
+                    value = str(getattr(field, "value", "") or "")
+
+                    fields[name] = value
+
+                    if "payload" in name or "preview" in name:
+                        payload_preview = value
+
+            except Exception:
+                pass
+
+        endpoint = fields.get("endpoint", "")
+        api_status = fields.get("api", "") or fields.get("http", "") or fields.get("status", "")
+        route = fields.get("route", "")
+        issue_count = fields.get("issue count", "") or fields.get("count", "")
+
+        if payload_preview:
+            evidence = self.b3e_build_evidence_from_payload(
+                payload_preview,
+                endpoint=endpoint,
+                api_status=api_status,
+                route=route,
+                source="alert_embed",
+            )
+        else:
+            evidence = self.b3e_build_evidence_from_payload(
+                fields,
+                endpoint=endpoint,
+                api_status=api_status,
+                route=route,
+                source="alert_embed_fields",
+            )
+
+        if issue_count:
+            try:
+                evidence["issue_count"] = int(str(issue_count).strip())
+            except Exception:
+                pass
+
+        if route and not evidence.get("route"):
+            evidence["route"] = route
+
+        if endpoint and not evidence.get("endpoint"):
+            evidence["endpoint"] = endpoint
+
+        if api_status and not evidence.get("api_status"):
+            evidence["api_status"] = api_status
+
+        return evidence
+
+    def b3e_endpoint_for_alert(self, alert_id: str, item: dict = None) -> str:
+        item = item or {}
+        raw = " ".join([
+            str(alert_id or ""),
+            str(item.get("identity", "")),
+            str(item.get("rule_id", "")),
+            str(item.get("title", "")),
+            str(item.get("raw_reference", "")),
+        ]).lower()
+
+        mapping = [
+            (["audit_highrisk", "high_risk_audit_events", "alert:audit_highrisk"], "/bot/audit/highrisk"),
+            (["support_critical", "alert:support_critical"], "/bot/support/critical"),
+            (["support_unassigned", "alert:support_unassigned"], "/bot/support/unassigned"),
+            (["billing_failed", "alert:billing_failed"], "/bot/billing/failed"),
+            (["billing_pastdue", "billing_past_due", "alert:billing_pastdue"], "/bot/billing/pastdue"),
+            (["security_risks", "alert:security_risks"], "/bot/security/risks"),
+            (["security_suspicious", "alert:security_suspicious"], "/bot/security/suspicious"),
+            (["automation_failed", "alert:automation_failed"], "/bot/automation/failed"),
+            (["discord_broken", "alert:discord_broken"], "/bot/discord/broken"),
+            (["roblox_broken", "alert:roblox_broken"], "/bot/roblox/broken"),
+            (["incidents", "alert:incidents"], "/bot/incidents"),
+        ]
+
+        for needles, endpoint in mapping:
+            if any(n in raw for n in needles):
+                return endpoint
+
+        return ""
+
+    async def b3e_fetch_api_evidence(self, guild, alert_id: str, item: dict = None):
+        """Fetch fresh evidence directly from the Mattis API for a known alert."""
+        try:
+            import aiohttp
+        except Exception:
+            return None
+
+        item = item or {}
+        endpoint = self.b3e_endpoint_for_alert(alert_id, item)
+
+        if not endpoint:
+            return None
+
+        api_url = None
+        api_token = None
+
+        if hasattr(self, "doctor_get_api_config_value"):
+            try:
+                api_url = await self.doctor_get_api_config_value(guild, [
+                    "api_url",
+                    "api_base_url",
+                    "mattis_api_url",
+                    "backend_url",
+                ])
+                api_token = await self.doctor_get_api_config_value(guild, [
+                    "api_token",
+                    "doctor_api_token",
+                    "bot_api_token",
+                    "mattis_api_token",
+                    "mattis_token",
+                    "api_key",
+                ])
+            except Exception:
+                pass
+
+        if not api_url:
+            api_url = "https://api.mattisproductions.com"
+
+        api_url = str(api_url).rstrip("/")
+        headers = {}
+
+        if api_token:
+            token = str(api_token).strip()
+            headers["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(api_url + endpoint, headers=headers) as resp:
+                    text = await resp.text()
+
+                    try:
+                        payload = await resp.json(content_type=None)
+                    except Exception:
+                        payload = text
+
+                    evidence = self.b3e_build_evidence_from_payload(
+                        payload,
+                        endpoint=endpoint,
+                        api_status=f"HTTP {resp.status}",
+                        route=item.get("investigation_route") or item.get("route") or "",
+                        source="api_fetch",
+                    )
+
+                    return evidence
+
+        except Exception:
+            return None
+
+    def b3e_evidence_brief(self, evidence: dict) -> str:
+        evidence = evidence or {}
+
+        lines = []
+
+        if evidence.get("summary"):
+            lines.append(evidence.get("summary"))
+
+        endpoint = evidence.get("endpoint")
+        api_status = evidence.get("api_status")
+        route = evidence.get("route")
+
+        if endpoint or api_status or route:
+            lines.append(f"Endpoint: `{endpoint or 'Unknown'}` | API: `{api_status or 'Unknown'}` | Route: `{route or 'Unknown'}`")
+
+        if evidence.get("newest_event_time"):
+            lines.append(f"Newest event: `{evidence.get('newest_event_time')}`")
+
+        reasons = evidence.get("reasons") or []
+        if reasons:
+            lines.append("Reasons:")
+            for reason in reasons[:4]:
+                lines.append(f"- {reason}")
+
+        actions = evidence.get("actions") or []
+        if actions:
+            lines.append("Actions: " + ", ".join(f"`{x}`" for x in actions[:5]))
+
+        actors = evidence.get("actor_user_ids") or []
+        if actors:
+            lines.append("Actors: " + ", ".join(f"`{x}`" for x in actors[:5]))
+
+        return "\n".join(lines)[:1024] if lines else ""
+
+    def b3e_evidence_lines(self, evidence: dict) -> list[str]:
+        evidence = evidence or {}
+
+        lines = [
+            f"Source: `{evidence.get('source', 'unknown')}`",
+            f"Endpoint: `{evidence.get('endpoint') or 'Unknown'}`",
+            f"API status: `{evidence.get('api_status') or 'Unknown'}`",
+            f"Route: `{evidence.get('route') or 'Unknown'}`",
+            f"Issue count: `{evidence.get('issue_count', 'Unknown')}`",
+            f"Event count: `{evidence.get('event_count', 'Unknown')}`",
+            f"Newest event: `{evidence.get('newest_event_time') or 'Unknown'}`",
+            "",
+            "**Summary:**",
+            evidence.get("summary") or "No evidence summary available.",
+            "",
+        ]
+
+        if evidence.get("risk_levels"):
+            lines.append("**Risk levels:**")
+            for risk in evidence.get("risk_levels", [])[:8]:
+                lines.append(f"- `{risk}`")
+            lines.append("")
+
+        if evidence.get("actions"):
+            lines.append("**Actions:**")
+            for action in evidence.get("actions", [])[:10]:
+                lines.append(f"- `{action}`")
+            lines.append("")
+
+        if evidence.get("reasons"):
+            lines.append("**Reasons:**")
+            for reason in evidence.get("reasons", [])[:10]:
+                lines.append(f"- {reason}")
+            lines.append("")
+
+        if evidence.get("actor_user_ids"):
+            lines.append("**Actor user IDs:**")
+            for actor in evidence.get("actor_user_ids", [])[:10]:
+                lines.append(f"- `{actor}`")
+            lines.append("")
+
+        return lines
+
+
+    @alerts.command(name="evidence")
+    async def alerts_evidence(self, ctx, *, alert_id: str):
+        """Show evidence behind an alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        evidence = item.get("evidence") or {}
+
+        if not evidence or not evidence.get("summary"):
+            fetched = await self.b3e_fetch_api_evidence(ctx.guild, key, item)
+
+            if fetched:
+                item["evidence"] = fetched
+                await self.b3b_save_alert_item(ctx.guild, key, item)
+                evidence = fetched
+
+        if not evidence:
+            await ctx.send(embed=info_embed(
+                "Alert Evidence",
+                "No evidence payload is stored for this alert yet. Run `!mcore alerts check` after cooldown, then try again."
+            ))
+            return
+
+        lines = [
+            f"**{item.get('title', key)}**",
+            f"Alert ID: `{key}`",
+            "",
+        ]
+
+        lines.extend(self.b3e_evidence_lines(evidence))
+
+        await self.send_paginated(ctx, "Alert Evidence", lines)
+
+    @alerts.command(name="events")
+    async def alerts_events(self, ctx, *, alert_id: str):
+        """Show parsed event samples for an alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        evidence = item.get("evidence") or {}
+
+        if not evidence or not evidence.get("sample_events"):
+            fetched = await self.b3e_fetch_api_evidence(ctx.guild, key, item)
+
+            if fetched:
+                item["evidence"] = fetched
+                await self.b3b_save_alert_item(ctx.guild, key, item)
+                evidence = fetched
+
+        events = evidence.get("sample_events") or []
+
+        if not events:
+            await ctx.send(embed=info_embed("Alert Events", "No parsed event samples are available for this alert."))
+            return
+
+        lines = [
+            f"**{item.get('title', key)}**",
+            f"Alert ID: `{key}`",
+            "",
+        ]
+
+        for idx, event in enumerate(events[:10], start=1):
+            lines.extend([
+                f"**Event {idx}**",
+                f"ID: `{event.get('id') or 'Unknown'}`",
+                f"Actor: `{event.get('actor') or 'Unknown'}`",
+                f"Action: `{event.get('action') or 'Unknown'}`",
+                f"Risk: `{event.get('risk') or 'Unknown'}`",
+                f"Reason: {event.get('reason') or 'Unknown'}",
+                f"Created: `{event.get('createdAt') or 'Unknown'}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Alert Event Samples", lines)
+
+    @alerts.command(name="payload")
+    async def alerts_payload(self, ctx, *, alert_id: str):
+        """Show a safe/redacted payload preview for an alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        evidence = item.get("evidence") or {}
+
+        if not evidence or not evidence.get("payload_preview"):
+            fetched = await self.b3e_fetch_api_evidence(ctx.guild, key, item)
+
+            if fetched:
+                item["evidence"] = fetched
+                await self.b3b_save_alert_item(ctx.guild, key, item)
+                evidence = fetched
+
+        payload = evidence.get("payload_preview")
+
+        if not payload:
+            await ctx.send(embed=info_embed("Alert Payload", "No payload preview is available for this alert."))
+            return
+
+        lines = [
+            f"**{item.get('title', key)}**",
+            f"Alert ID: `{key}`",
+            "",
+            "```json",
+            payload[:1800],
+            "```",
+        ]
+
+        await self.send_paginated(ctx, "Alert Payload Preview", lines)
+
     @alerts.command(name="open")
     async def alerts_open(self, ctx):
         """Show open/unresolved alerts."""
@@ -8460,6 +9035,7 @@ class MattisCore(commands.Cog):
 
 
 
+
     async def b3a_build_alert_intelligence(self, guild, embed=None, content=None, identity=None, fingerprint=None, existing=None, status=None) -> dict:
         existing = existing or {}
 
@@ -8504,11 +9080,24 @@ class MattisCore(commands.Cog):
         if route == "Unknown" and path:
             route = "#" + path
 
-        # Known route correction for current audit alert.
         if route == "Unknown" and any(x in raw.lower() for x in ["audit_highrisk", "high_risk_audit_events", "bot_audit_highrisk", "observatory_logs_audit_log"]):
             route = "#observatory-logs-audit-log / #bot-audit-highrisk"
 
         status = status or existing.get("status") or "new"
+
+        evidence = existing.get("evidence")
+
+        if not evidence and hasattr(self, "b3e_extract_embed_evidence"):
+            try:
+                evidence = self.b3e_extract_embed_evidence(embed=embed, content=content)
+            except Exception:
+                evidence = None
+
+        if evidence and evidence.get("issue_count") is not None:
+            try:
+                count = int(evidence.get("issue_count"))
+            except Exception:
+                pass
 
         meta = {
             "alert_id": identity or existing.get("alert_id") or "unknown",
@@ -8538,6 +9127,7 @@ class MattisCore(commands.Cog):
             "post_count": int(existing.get("post_count", 0)),
             "suppressed_count": int(existing.get("suppressed_count", 0)),
             "last_change": "",
+            "evidence": evidence or {},
         }
 
         if existing:
@@ -8583,7 +9173,7 @@ class MattisCore(commands.Cog):
         def add(name, value, inline=False):
             value = self.b3a_clean_alert_text(value)
 
-            if not value or value.lower() == "none":
+            if not value or str(value).lower() == "none":
                 value = "Unknown"
 
             new_embed.add_field(name=name, value=str(value)[:1024], inline=inline)
@@ -8596,6 +9186,18 @@ class MattisCore(commands.Cog):
         add("Subsystem", meta.get("subsystem"), True)
         add("Owner Team", meta.get("owner"), True)
 
+        evidence = meta.get("evidence") or {}
+        evidence_brief = ""
+
+        if hasattr(self, "b3e_evidence_brief"):
+            try:
+                evidence_brief = self.b3e_evidence_brief(evidence)
+            except Exception:
+                evidence_brief = ""
+
+        if evidence_brief:
+            add("Evidence Summary", evidence_brief, False)
+
         add("Customer Impact", meta.get("customer_impact"), False)
         add("Internal Impact", meta.get("internal_impact"), False)
         add("Severity Reason", meta.get("severity_reason"), False)
@@ -8605,8 +9207,16 @@ class MattisCore(commands.Cog):
         add("Trend", meta.get("trend"), True)
 
         related = meta.get("related_commands") or []
+
+        if evidence:
+            related = list(related) + [
+                f"!mcore alerts evidence {meta.get('alert_id', 'audit')}",
+                f"!mcore alerts events {meta.get('alert_id', 'audit')}",
+                f"!mcore alerts payload {meta.get('alert_id', 'audit')}",
+            ]
+
         if related:
-            add("Related Commands", "\n".join(f"`{x}`" for x in related[:8]), False)
+            add("Related Commands", "\n".join(f"`{x}`" for x in related[:10]), False)
 
         lifecycle = (
             f"Posts: `{meta.get('post_count', 0)}`\n"
