@@ -7175,6 +7175,245 @@ class MattisCore(commands.Cog):
         return text.title()[:120]
 
 
+
+    def b3a_alert_profile(self, raw: str, count: int = 0) -> dict:
+        raw = str(raw or "")
+        low = raw.lower()
+
+        def profile(
+            title,
+            area,
+            subsystem,
+            owner,
+            escalation,
+            customer_impact,
+            internal_impact,
+            why,
+            action,
+            commands,
+            severity="low",
+            severity_reason="Low severity because no urgent impact was detected.",
+        ):
+            return {
+                "title": title,
+                "area": area,
+                "subsystem": subsystem,
+                "owner": owner,
+                "escalation": escalation,
+                "customer_impact": customer_impact,
+                "internal_impact": internal_impact,
+                "why_it_matters": why,
+                "recommended_action": action,
+                "related_commands": commands,
+                "severity": severity,
+                "severity_reason": severity_reason,
+            }
+
+        if any(x in low for x in [
+            "audit_highrisk",
+            "high_risk_audit_events",
+            "bot_audit_highrisk",
+            "highrisk",
+            "high risk audit",
+            "observatory_logs_audit_log",
+        ]):
+            severity = "high" if int(count or 0) >= 5 else "medium"
+            return profile(
+                "High Risk Audit Events",
+                "Audit / Security",
+                "High-Risk Audit Trail",
+                "Audit Reviewer + Security Admin",
+                "Audit Reviewer → Security Admin → Incident Response → Founder",
+                "No direct customer impact detected from this alert alone. Customer impact becomes possible if the audit entries involve customer accounts, billing, access, or production data.",
+                "Sensitive internal staff/system activity requires review. This may include permissions, route changes, admin actions, token/config changes, or unusual internal behaviour.",
+                "High-risk audit events matter because they can reveal sensitive operational changes, staff actions, permission changes, or suspicious internal activity before they become a larger incident.",
+                "Open the high-risk audit route, review the newest entries first, confirm whether they match expected staff/admin actions, and escalate anything unauthorised or unusual.",
+                [
+                    "!mcore alerts ops",
+                    "!mcore alerts show audit",
+                    "!mcore alerts explain audit",
+                    "!mcore alerts investigate audit",
+                    "!mcore doctor capabilities",
+                    "!mcore access matrix",
+                ],
+                severity,
+                f"{severity.title()} severity because `{count}` high-risk audit event(s) are active and require review.",
+            )
+
+        if any(x in low for x in [
+            "billing_failed",
+            "failed invoice",
+            "failed_invoices",
+            "payment_fail",
+            "stripe",
+        ]):
+            severity = "high" if int(count or 0) >= 5 else "medium"
+            return profile(
+                "Failed Billing / Failed Invoices",
+                "Billing",
+                "Payments / Invoices",
+                "Billing Support",
+                "Billing Support → Director → Founder",
+                "Customers may lose access, fail renewal, or need payment support if invoices are failing.",
+                "Billing Support may need to review customer accounts, failed payments, invoice status, Stripe/webhook events, and access state.",
+                "Failed billing matters because it can affect customer access, revenue collection, subscriptions, and trust.",
+                "Review failed invoice/payment records, confirm whether failures are isolated or increasing, and contact or escalate affected customers.",
+                ["!mcore alerts ops", "!mcore doctor api"],
+                severity,
+                f"{severity.title()} severity because failed billing can affect customer access/revenue and count is `{count}`.",
+            )
+
+        if any(x in low for x in ["billing_pastdue", "past_due", "pastdue"]):
+            return profile(
+                "Past Due Billing",
+                "Billing",
+                "Invoices / Account Status",
+                "Billing Support",
+                "Billing Support → Director → Founder",
+                "Customers may be overdue and at risk of losing access depending on billing rules.",
+                "Billing team should review overdue accounts and decide whether reminders/escalation are needed.",
+                "Past-due billing matters because unresolved invoices can become access issues, support tickets, or revenue loss.",
+                "Review past-due invoices, check customer history, and follow billing support process.",
+                ["!mcore alerts ops", "!mcore doctor api"],
+                "medium",
+                f"Medium severity because `{count}` past-due billing item(s) require review.",
+            )
+
+        if "support_critical" in low:
+            return profile(
+                "Critical Support Tickets",
+                "Support",
+                "Critical Tickets",
+                "Support Lead",
+                "Support Agent → Support Lead → Management",
+                "Customers may be blocked, unhappy, or waiting for urgent help.",
+                "Support Lead should make sure urgent tickets have ownership and escalation.",
+                "Critical support tickets matter because they can quickly become customer-impacting incidents.",
+                "Open the support route, assign an owner, respond to urgent customers, and escalate unresolved critical issues.",
+                ["!mcore alerts ops", "!mcore doctor"],
+                "high",
+                f"High severity because `{count}` critical support ticket(s) may require urgent action.",
+            )
+
+        if "support_unassigned" in low:
+            return profile(
+                "Unassigned Support Tickets",
+                "Support",
+                "Ticket Assignment",
+                "Support Lead",
+                "Support Agent → Support Lead",
+                "Customers may be waiting without a clear owner.",
+                "Support Lead should assign tickets and monitor response delays.",
+                "Unassigned tickets matter because nobody owns the customer response until they are assigned.",
+                "Review unassigned tickets, assign owners, and escalate anything urgent.",
+                ["!mcore alerts ops", "!mcore doctor"],
+                "medium",
+                f"Medium severity because `{count}` unassigned support ticket(s) may be waiting for ownership.",
+            )
+
+        if any(x in low for x in [
+            "security_risks",
+            "security_suspicious",
+            "suspicious",
+            "exploit",
+            "compromise",
+        ]):
+            return profile(
+                "Security Risk Events",
+                "Security",
+                "Security Monitoring",
+                "Security Support + Security Admin",
+                "Security Support → Security Admin → Incident Response → Founder",
+                "Possible customer impact if accounts, sessions, billing, or production access are involved.",
+                "Security staff must verify whether this is expected, suspicious, or actively harmful.",
+                "Security alerts matter because they can indicate suspicious activity, account risk, abuse, or unauthorised access attempts.",
+                "Investigate the source, affected account/session/system, confirm legitimacy, and escalate if suspicious.",
+                ["!mcore alerts ops", "!mcore doctor capabilities", "!mcore access matrix"],
+                "high",
+                f"High severity because security-risk activity needs review. Active count: `{count}`.",
+            )
+
+        if "automation_failed" in low:
+            return profile(
+                "Automation Failures",
+                "Automation",
+                "Internal Automation Jobs",
+                "Infrastructure Admin + Lead Developer",
+                "Infrastructure Admin → Lead Developer → Founder",
+                "Customer impact depends on which automation failed.",
+                "Internal workflows, sync jobs, alerts, or scheduled checks may be failing.",
+                "Automation failures matter because background workflows can silently stop doing important work.",
+                "Review the failed automation route/logs and confirm which job failed and whether it needs rerunning.",
+                ["!mcore alerts ops", "!mcore doctor"],
+                "medium",
+                f"Medium severity because `{count}` automation failure(s) may require review.",
+            )
+
+        if "discord_broken" in low:
+            return profile(
+                "Discord Integration Issues",
+                "Discord Bot",
+                "Redbot / Discord Integration",
+                "Infrastructure Admin + Lead Developer",
+                "Infrastructure Admin → Lead Developer → Founder",
+                "Usually internal impact unless customers rely on Discord workflows.",
+                "Staff commands, alerts, logs, support flows, or role sync may be affected.",
+                "Discord integration issues matter because the bot is used for internal operations and support workflows.",
+                "Check Redbot process, loaded cogs, bot permissions, command errors, and recent reloads.",
+                ["!mcore doctor", "!mcore doctor routes", "!mcore doctor gates"],
+                "medium",
+                f"Medium severity because Discord/bot integration health needs review. Count: `{count}`.",
+            )
+
+        if "roblox_broken" in low:
+            return profile(
+                "Roblox Integration Issues",
+                "Roblox Integration",
+                "Roblox OAuth / API / Sync",
+                "Developer + Roblox Systems",
+                "Developer → Lead Developer → Founder",
+                "Customers using Roblox-linked CMS features may be affected.",
+                "Verification, marketplace, sync, or Roblox-related workflows may need review.",
+                "Roblox integration issues matter because Mattis CMS is Roblox-focused and depends on Roblox workflows.",
+                "Check Roblox API/OAuth/webhook configuration and related API logs.",
+                ["!mcore alerts ops", "!mcore doctor api"],
+                "medium",
+                f"Medium severity because Roblox integration issues can affect customer workflows. Count: `{count}`.",
+            )
+
+        if "incidents" in low:
+            return profile(
+                "Active Incidents",
+                "Incident Response",
+                "Incident Management",
+                "Incident Response + Management",
+                "Incident Response → Management → Founder",
+                "Customer impact depends on the incident type and affected service.",
+                "Incident responders need to confirm ownership, status, impact, and resolution progress.",
+                "Incidents matter because they represent active operational problems that need tracking until resolved.",
+                "Review active incidents, confirm status/owner, update timeline, and escalate unresolved high-impact incidents.",
+                ["!mcore alerts ops", "!mcore doctor"],
+                "high",
+                f"High severity because active incident tracking indicates `{count}` incident-related item(s).",
+            )
+
+        severity = "medium" if int(count or 0) >= 5 else "low"
+
+        return profile(
+            self.b3a_human_rule_name(raw),
+            "Mattis CMS | Systems",
+            "General Operations",
+            "Management",
+            "Management → Founder",
+            "No direct customer impact detected from this alert alone.",
+            "Internal review may be required.",
+            "This alert may indicate something that needs review inside Mattis CMS | Systems.",
+            "Review the routed logs and confirm whether action is required.",
+            ["!mcore alerts ops", "!mcore doctor"],
+            severity,
+            f"{severity.title()} severity based on count `{count}` and no stronger classification match.",
+        )
+
     def b3a_classify_alert(self, raw: str, count: int = 0) -> dict:
         return self.b3a_alert_profile(raw, count)
 
