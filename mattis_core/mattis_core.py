@@ -2327,12 +2327,13 @@ class MattisCore(commands.Cog):
     @alerts.command(name="ops")
 
 
+
     async def alerts_ops(self, ctx):
         """Show active alerts using the Operations Alert Intelligence view."""
         if not await require_admin(ctx):
             return
 
-        changed, state = await self.b3a_enrich_all_alert_state(ctx.guild)
+        changed, state = await self.b3c_normalize_alert_state(ctx.guild)
 
         if not state:
             await ctx.send(embed=info_embed("Operations Alerts", "No active lifecycle alerts are currently tracked."))
@@ -2355,17 +2356,17 @@ class MattisCore(commands.Cog):
 
             lines.extend([
                 f"**{str(title)[:120]}**",
+                f"Alert ID: `{alert_id}`",
                 f"Status: `{status}` | Severity: `{severity}` | Count: `{count}`",
                 f"Area: `{area}` | Subsystem: `{subsystem}`",
                 f"Owner: `{owner}` | Route: `{route}`",
                 f"Posts: `{post_count}` | Suppressed duplicates: `{suppressed}`",
                 f"Action: {action}",
-                f"Show: `!mcore alerts show {str(alert_id)[:60]}`",
+                f"Show: `!mcore alerts show {alert_id}`",
                 "",
             ])
 
         await self.send_paginated(ctx, "Operations Alerts", lines)
-
 
     def b3b_now_iso(self) -> str:
         from datetime import datetime, timezone
@@ -2391,15 +2392,40 @@ class MattisCore(commands.Cog):
         item["timeline"] = timeline[-75:]
         return item
 
+
     async def b3b_save_alert_item(self, guild, alert_id: str, item: dict):
         cfg = await get_core_config(self.bot)
         lifecycle = await cfg.guild(guild).alert_lifecycle()
         lifecycle = lifecycle or {}
 
         state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
-        state[alert_id] = item
 
+        canonical = self.b3a_canonical_alert_key(
+            alert_id,
+            item.get("identity", ""),
+            item.get("rule_id", ""),
+            item.get("alert_id", ""),
+            item.get("title", ""),
+            item.get("raw_reference", ""),
+        )
+
+        item["alert_id"] = canonical
+        item["rule_id"] = canonical
+        item["identity"] = canonical
+        item["raw_reference"] = canonical
+
+        # Remove old key if it existed.
+        if alert_id in state and alert_id != canonical:
+            old_item = state.pop(alert_id)
+            item = self.b3c_merge_alert_items(old_item, item)
+
+        if canonical in state:
+            item = self.b3c_merge_alert_items(state[canonical], item)
+
+        state[canonical] = item
         lifecycle["b2_state"] = state
+        lifecycle.pop("state", None)
+
         await cfg.guild(guild).alert_lifecycle.set(lifecycle)
 
     async def b3b_find_alert(self, guild, query: str):
@@ -2452,6 +2478,146 @@ class MattisCore(commands.Cog):
 
         return None
 
+
+
+    def b3c_merge_alert_items(self, base: dict, incoming: dict) -> dict:
+        """Merge duplicate alert state safely, preserving action/timeline data."""
+        base = dict(base or {})
+        incoming = dict(incoming or {})
+
+        # Prefer richer/newer operational intelligence fields.
+        for key, value in incoming.items():
+            if value is None:
+                continue
+
+            if key in {"timeline", "notes"}:
+                continue
+
+            if base.get(key) in [None, "", "Unknown", "unknown", 0]:
+                base[key] = value
+            elif key in {
+                "last_seen",
+                "last_posted",
+                "last_channel_id",
+                "last_message_id",
+                "status",
+                "resolved",
+                "owner",
+                "assigned_role_id",
+                "assigned_role_name",
+                "assigned_by",
+                "assigned_by_id",
+                "assigned_at",
+                "acknowledged_by",
+                "acknowledged_by_id",
+                "acknowledged_at",
+                "resolved_by",
+                "resolved_by_id",
+                "resolved_at",
+                "reopened_by",
+                "reopened_by_id",
+                "reopened_at",
+            }:
+                base[key] = value
+
+        base["post_count"] = max(int(base.get("post_count", 0) or 0), int(incoming.get("post_count", 0) or 0))
+        base["suppressed_count"] = max(int(base.get("suppressed_count", 0) or 0), int(incoming.get("suppressed_count", 0) or 0))
+
+        # Merge timeline by timestamp/action/details.
+        timeline = []
+        seen = set()
+
+        for source in [base.get("timeline") or [], incoming.get("timeline") or []]:
+            for entry in source:
+                marker = (
+                    str(entry.get("at")),
+                    str(entry.get("action")),
+                    str(entry.get("actor")),
+                    str(entry.get("details")),
+                )
+                if marker not in seen:
+                    seen.add(marker)
+                    timeline.append(entry)
+
+        timeline.sort(key=lambda x: str(x.get("at", "")))
+        base["timeline"] = timeline[-75:]
+
+        # Merge notes.
+        notes = []
+        seen_notes = set()
+
+        for source in [base.get("notes") or [], incoming.get("notes") or []]:
+            for note in source:
+                marker = (
+                    str(note.get("at")),
+                    str(note.get("author")),
+                    str(note.get("note")),
+                )
+                if marker not in seen_notes:
+                    seen_notes.add(marker)
+                    notes.append(note)
+
+        notes.sort(key=lambda x: str(x.get("at", "")))
+        base["notes"] = notes[-50:]
+
+        return base
+
+    async def b3c_normalize_alert_state(self, guild):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        old_state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
+        new_state = {}
+        changed = 0
+
+        for old_key, item in old_state.items():
+            raw = " ".join([
+                str(old_key),
+                str(item.get("identity", "")),
+                str(item.get("rule_id", "")),
+                str(item.get("alert_id", "")),
+                str(item.get("title", "")),
+                str(item.get("raw_reference", "")),
+                str(item.get("investigation_route", "")),
+                str(item.get("route", "")),
+            ])
+
+            canonical = self.b3a_canonical_alert_key(raw)
+
+            enriched = await self.b3a_enrich_existing_alert_item(guild, canonical, item)
+            enriched["alert_id"] = canonical
+            enriched["rule_id"] = canonical
+            enriched["identity"] = canonical
+            enriched["raw_reference"] = canonical
+
+            if canonical != old_key:
+                changed += 1
+
+            if canonical in new_state:
+                new_state[canonical] = self.b3c_merge_alert_items(new_state[canonical], enriched)
+            else:
+                new_state[canonical] = enriched
+
+        lifecycle["b2_state"] = new_state
+        lifecycle.pop("state", None)
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+        return changed, new_state
+
+
+    @alerts.command(name="normalize")
+    async def alerts_normalize(self, ctx):
+        """Migrate old hash-based alert state into stable canonical alert IDs."""
+        if not await require_admin(ctx):
+            return
+
+        changed, state = await self.b3c_normalize_alert_state(ctx.guild)
+
+        await ctx.send(embed=ok_embed(
+            "Alert state normalized",
+            f"Migrated `{changed}` old alert key(s). Current tracked alert(s): `{len(state)}`."
+        ))
 
     @alerts.command(name="ack")
     async def alerts_ack(self, ctx, alert_id: str, *, note: str = ""):
@@ -7906,6 +8072,7 @@ class MattisCore(commands.Cog):
 
         return merged
 
+
     async def b3a_find_alert_state_item(self, guild, query: str):
         cfg = await get_core_config(self.bot)
         lifecycle = await cfg.guild(guild).alert_lifecycle()
@@ -7914,6 +8081,18 @@ class MattisCore(commands.Cog):
 
         q = str(query or "").lower().strip()
 
+        # Prefer canonical query matching first.
+        canonical_query = self.b3a_canonical_alert_key(q)
+
+        for key, item in state.items():
+            if q == str(key).lower() or canonical_query == key:
+                enriched = await self.b3a_enrich_existing_alert_item(guild, key, item)
+                state[key] = enriched
+                lifecycle["b2_state"] = state
+                await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+                return key, enriched
+
+        # Fuzzy matching.
         for key, item in state.items():
             haystack = " ".join([
                 str(key),
@@ -7926,12 +8105,9 @@ class MattisCore(commands.Cog):
 
             if q in haystack:
                 enriched = await self.b3a_enrich_existing_alert_item(guild, key, item)
-
-                # Save back enriched state.
                 state[key] = enriched
                 lifecycle["b2_state"] = state
                 await cfg.guild(guild).alert_lifecycle.set(lifecycle)
-
                 return key, enriched
 
         return None, None
