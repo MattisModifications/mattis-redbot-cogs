@@ -2657,6 +2657,7 @@ class MattisCore(commands.Cog):
         last_seen = str((item or {}).get("last_seen") or "")
         return (status_rank, sev_rank, last_seen)
 
+
     def b3d_render_alert_lines(self, alert_id: str, item: dict, include_action: bool = True, compact: bool = False) -> list[str]:
         item = item or {}
 
@@ -2671,9 +2672,17 @@ class MattisCore(commands.Cog):
         suppressed = item.get("suppressed_count", 0)
         emoji = self.b3d_status_emoji(item)
 
+        sla = None
+        if hasattr(self, "b3f_sla_status"):
+            try:
+                sla = self.b3f_sla_status(item)
+            except Exception:
+                sla = None
+
         if compact:
+            sla_label = f" / SLA `{sla.get('label')}`" if sla else ""
             return [
-                f"{emoji} **{title}** — `{status}` / `{severity}` / Count `{count}` / Owner `{owner}` / `{alert_id}`"
+                f"{emoji} **{title}** — `{status}` / `{severity}` / Count `{count}` / Owner `{owner}`{sla_label} / `{alert_id}`"
             ]
 
         lines = [
@@ -2683,6 +2692,9 @@ class MattisCore(commands.Cog):
             f"Area: `{area}` | Owner: `{owner}` | Route: `{route}`",
             f"Posts: `{posts}` | Suppressed duplicates: `{suppressed}`",
         ]
+
+        if sla:
+            lines.append(f"SLA: `{sla.get('label')}` | Age: `{sla.get('age_minutes')} min` | Next: {sla.get('next_step')}")
 
         if item.get("acknowledged_by"):
             lines.append(f"Acknowledged by: `{item.get('acknowledged_by')}`")
@@ -2704,8 +2716,6 @@ class MattisCore(commands.Cog):
         ])
 
         return lines
-
-
 
     def b3e_redact_payload(self, obj):
         """Redact secret-looking payload values while keeping useful evidence keys/reasons."""
@@ -3154,6 +3164,412 @@ class MattisCore(commands.Cog):
 
         return lines
 
+
+
+    def b3f_parse_iso(self, value):
+        from datetime import datetime, timezone
+
+        if not value:
+            return None
+
+        try:
+            value = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    def b3f_now(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
+
+    def b3f_sla_minutes(self, severity: str) -> dict:
+        severity = str(severity or "low").lower()
+
+        if severity == "critical":
+            return {
+                "ack": 5,
+                "investigate": 15,
+                "update": 30,
+            }
+
+        if severity == "high":
+            return {
+                "ack": 15,
+                "investigate": 30,
+                "update": 60,
+            }
+
+        if severity == "medium":
+            return {
+                "ack": 60,
+                "investigate": 120,
+                "update": 240,
+            }
+
+        return {
+            "ack": 240,
+            "investigate": 480,
+            "update": 720,
+        }
+
+    def b3f_escalation_path_list(self, item: dict) -> list[str]:
+        item = item or {}
+        raw = str(item.get("escalation") or item.get("owner") or "Management → Founder")
+
+        parts = []
+
+        for token in raw.replace("->", "→").split("→"):
+            token = token.strip()
+            if token:
+                parts.append(token)
+
+        if not parts:
+            parts = ["Management", "Founder"]
+
+        return parts
+
+    def b3f_alert_age_minutes(self, item: dict) -> int:
+        first_seen = self.b3f_parse_iso(item.get("first_seen") or item.get("last_seen") or item.get("acknowledged_at"))
+        if not first_seen:
+            return 0
+
+        delta = self.b3f_now() - first_seen
+        return max(0, int(delta.total_seconds() // 60))
+
+    def b3f_minutes_since_last_update(self, item: dict) -> int:
+        last = (
+            item.get("last_seen")
+            or item.get("last_posted")
+            or item.get("acknowledged_at")
+            or item.get("first_seen")
+        )
+
+        dt = self.b3f_parse_iso(last)
+
+        if not dt:
+            return 0
+
+        delta = self.b3f_now() - dt
+        return max(0, int(delta.total_seconds() // 60))
+
+    def b3f_sla_status(self, item: dict) -> dict:
+        item = item or {}
+
+        status = str(item.get("status") or "ongoing").lower()
+        severity = str(item.get("severity") or "low").lower()
+        sla = self.b3f_sla_minutes(severity)
+        age = self.b3f_alert_age_minutes(item)
+        since_update = self.b3f_minutes_since_last_update(item)
+
+        acknowledged = bool(item.get("acknowledged_at")) or status in ["acknowledged", "resolved", "reopened"]
+        resolved = bool(item.get("resolved")) or status == "resolved"
+
+        ack_overdue = False
+        investigation_overdue = False
+        update_overdue = False
+
+        if not resolved:
+            ack_overdue = not acknowledged and age >= sla["ack"]
+            investigation_overdue = acknowledged and age >= sla["investigate"] and not item.get("assigned_role_name")
+            update_overdue = acknowledged and since_update >= sla["update"]
+
+        overdue = ack_overdue or investigation_overdue or update_overdue
+
+        if resolved:
+            label = "Resolved"
+        elif overdue:
+            label = "Overdue"
+        elif acknowledged:
+            label = "Within SLA / Acknowledged"
+        else:
+            label = "Waiting for acknowledgement"
+
+        next_step = "No action required."
+
+        if resolved:
+            next_step = "Alert is resolved. Reopen if the API still reports the issue."
+        elif ack_overdue:
+            next_step = "Acknowledge this alert and assign an owner immediately."
+        elif investigation_overdue:
+            next_step = "Assign an owner/team and begin investigation."
+        elif update_overdue:
+            next_step = "Post an update/note or escalate if no progress has been made."
+        elif not acknowledged:
+            next_step = f"Acknowledge within {sla['ack']} minutes of first seen."
+        elif acknowledged and not item.get("assigned_role_name"):
+            next_step = "Assign an owner/team if investigation is required."
+
+        return {
+            "label": label,
+            "severity": severity,
+            "age_minutes": age,
+            "minutes_since_update": since_update,
+            "ack_sla_minutes": sla["ack"],
+            "investigate_sla_minutes": sla["investigate"],
+            "update_sla_minutes": sla["update"],
+            "acknowledged": acknowledged,
+            "resolved": resolved,
+            "ack_overdue": ack_overdue,
+            "investigation_overdue": investigation_overdue,
+            "update_overdue": update_overdue,
+            "overdue": overdue,
+            "next_step": next_step,
+        }
+
+    def b3f_sla_brief(self, item: dict) -> str:
+        data = self.b3f_sla_status(item)
+
+        return (
+            f"Status: `{data['label']}`\n"
+            f"Age: `{data['age_minutes']} min`\n"
+            f"Ack SLA: `{data['ack_sla_minutes']} min`\n"
+            f"Investigation SLA: `{data['investigate_sla_minutes']} min`\n"
+            f"Update SLA: `{data['update_sla_minutes']} min`\n"
+            f"Next step: {data['next_step']}"
+        )
+
+    def b3f_recommended_escalation_target(self, item: dict) -> str:
+        path = self.b3f_escalation_path_list(item)
+
+        status = str(item.get("status") or "ongoing").lower()
+        assigned = item.get("assigned_role_name")
+        acknowledged = bool(item.get("acknowledged_at")) or status in ["acknowledged", "resolved", "reopened"]
+
+        if not acknowledged:
+            return path[0] if path else "Management"
+
+        if assigned and len(path) > 1:
+            # If already assigned to first team, escalate to the next step where possible.
+            assigned_l = str(assigned).lower()
+            for idx, step in enumerate(path):
+                if step.lower() in assigned_l or assigned_l in step.lower():
+                    if idx + 1 < len(path):
+                        return path[idx + 1]
+            return path[min(1, len(path) - 1)]
+
+        return path[0] if path else "Management"
+
+
+    @alerts.command(name="sla")
+    async def alerts_sla(self, ctx):
+        """Show SLA status for tracked alerts."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild) if hasattr(self, "b3d_get_alert_state") else {}
+
+        if not state:
+            await ctx.send(embed=info_embed("Alert SLA", "No lifecycle alerts are currently tracked."))
+            return
+
+        items = list(state.items())
+
+        if hasattr(self, "b3d_alert_sort_key"):
+            items.sort(key=self.b3d_alert_sort_key)
+
+        lines = []
+
+        for alert_id, item in items[:50]:
+            title = item.get("title") or self.b3a_human_rule_name(alert_id)
+            sla = self.b3f_sla_status(item)
+            target = self.b3f_recommended_escalation_target(item)
+
+            lines.extend([
+                f"**{title}**",
+                f"Alert ID: `{alert_id}`",
+                f"SLA status: `{sla['label']}`",
+                f"Severity: `{str(item.get('severity', 'unknown')).title()}` | Age: `{sla['age_minutes']} min` | Since update: `{sla['minutes_since_update']} min`",
+                f"Ack SLA: `{sla['ack_sla_minutes']} min` | Investigation SLA: `{sla['investigate_sla_minutes']} min` | Update SLA: `{sla['update_sla_minutes']} min`",
+                f"Recommended escalation target: `{target}`",
+                f"Next step: {sla['next_step']}",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Alert SLA Status", lines)
+
+    @alerts.command(name="overdue")
+    async def alerts_overdue(self, ctx):
+        """Show alerts that are overdue for acknowledgement, investigation, or update."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild) if hasattr(self, "b3d_get_alert_state") else {}
+
+        overdue = []
+
+        for alert_id, item in state.items():
+            sla = self.b3f_sla_status(item)
+
+            if sla.get("overdue"):
+                overdue.append((alert_id, item, sla))
+
+        overdue.sort(key=lambda x: (str(x[1].get("severity", "")), -int(x[2].get("age_minutes", 0))))
+
+        if not overdue:
+            await ctx.send(embed=ok_embed("Overdue Alerts", "No alerts are currently overdue."))
+            return
+
+        lines = []
+
+        for alert_id, item, sla in overdue[:30]:
+            title = item.get("title") or self.b3a_human_rule_name(alert_id)
+            target = self.b3f_recommended_escalation_target(item)
+
+            reasons = []
+            if sla.get("ack_overdue"):
+                reasons.append("acknowledgement overdue")
+            if sla.get("investigation_overdue"):
+                reasons.append("investigation assignment overdue")
+            if sla.get("update_overdue"):
+                reasons.append("update overdue")
+
+            lines.extend([
+                f"🚨 **{title}**",
+                f"Alert ID: `{alert_id}`",
+                f"Reason: `{', '.join(reasons)}`",
+                f"Age: `{sla['age_minutes']} min` | Severity: `{str(item.get('severity', 'unknown')).title()}`",
+                f"Owner: `{item.get('owner', 'Unknown')}` | Escalate to: `{target}`",
+                f"Next step: {sla['next_step']}",
+                f"Escalate: `!mcore alerts escalate {alert_id} <note>`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Overdue Alerts", lines)
+
+    @alerts.command(name="escalation")
+    async def alerts_escalation(self, ctx, *, alert_id: str):
+        """Show escalation plan for one alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        path = self.b3f_escalation_path_list(item)
+        sla = self.b3f_sla_status(item)
+        target = self.b3f_recommended_escalation_target(item)
+
+        lines = [
+            f"**{item.get('title', key)}**",
+            f"Alert ID: `{key}`",
+            f"Status: `{self.b3a_status_label(item.get('status', 'ongoing'))}`",
+            f"Severity: `{str(item.get('severity', 'unknown')).title()}`",
+            "",
+            "**SLA:**",
+            f"Current SLA status: `{sla['label']}`",
+            f"Age: `{sla['age_minutes']} min`",
+            f"Ack SLA: `{sla['ack_sla_minutes']} min`",
+            f"Investigation SLA: `{sla['investigate_sla_minutes']} min`",
+            f"Update SLA: `{sla['update_sla_minutes']} min`",
+            f"Next step: {sla['next_step']}",
+            "",
+            "**Escalation path:**",
+        ]
+
+        for idx, step in enumerate(path, start=1):
+            marker = "⬅️ recommended next" if step == target else ""
+            lines.append(f"{idx}. `{step}` {marker}")
+
+        lines.extend([
+            "",
+            f"Recommended escalation target: `{target}`",
+            f"Escalate command: `!mcore alerts escalate {key} <note>`",
+        ])
+
+        await self.send_paginated(ctx, "Alert Escalation Plan", lines)
+
+    @alerts.command(name="escalate")
+    async def alerts_escalate(self, ctx, alert_id: str, *, note: str = ""):
+        """Escalate an alert to the next team/person in its escalation path."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        target = self.b3f_recommended_escalation_target(item)
+        actor = self.b3b_actor(ctx) if hasattr(self, "b3b_actor") else str(ctx.author)
+
+        item["status"] = "reopened" if item.get("resolved") else item.get("status", "ongoing")
+        item["escalated_to"] = target
+        item["escalated_by"] = str(ctx.author)
+        item["escalated_by_id"] = getattr(ctx.author, "id", None)
+        item["escalated_at"] = self.b3b_now_iso() if hasattr(self, "b3b_now_iso") else self.b3f_now().isoformat()
+
+        details = f"Escalated to {target}"
+        if note:
+            details += f" — {note}"
+
+        if hasattr(self, "b3b_add_timeline"):
+            item = self.b3b_add_timeline(item, "escalated", actor, details)
+
+        notes = item.get("notes") or []
+        if note:
+            notes.append({
+                "at": item["escalated_at"],
+                "author": str(ctx.author),
+                "note": f"Escalated to {target}: {note}",
+            })
+            item["notes"] = notes[-50:]
+
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+
+        if hasattr(self, "b3b_try_edit_alert_message"):
+            await self.b3b_try_edit_alert_message(ctx.guild, item)
+
+        await ctx.send(embed=ok_embed(
+            "Alert escalated",
+            f"`{item.get('title', key)}` escalated to `{target}`."
+        ))
+
+    @alerts.command(name="priority")
+    async def alerts_priority(self, ctx, alert_id: str, severity: str):
+        """Manually set alert priority/severity."""
+        if not await require_admin(ctx):
+            return
+
+        severity = str(severity or "").lower().strip()
+
+        if severity not in ["critical", "high", "medium", "low"]:
+            await ctx.send(embed=error_embed("Invalid priority", "Use one of: `critical`, `high`, `medium`, `low`."))
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        old = item.get("severity", "unknown")
+        item["severity"] = severity
+        item["severity_reason"] = f"Manually set from `{old}` to `{severity}` by `{ctx.author}`."
+
+        if hasattr(self, "b3b_add_timeline"):
+            item = self.b3b_add_timeline(
+                item,
+                "priority_changed",
+                self.b3b_actor(ctx),
+                f"Priority changed from {old} to {severity}",
+            )
+
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+
+        if hasattr(self, "b3b_try_edit_alert_message"):
+            await self.b3b_try_edit_alert_message(ctx.guild, item)
+
+        await ctx.send(embed=ok_embed(
+            "Alert priority updated",
+            f"`{item.get('title', key)}` priority changed from `{old}` to `{severity}`."
+        ))
 
     @alerts.command(name="evidence")
     async def alerts_evidence(self, ctx, *, alert_id: str):
