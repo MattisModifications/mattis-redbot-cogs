@@ -6863,91 +6863,40 @@ class MattisCore(commands.Cog):
 
         return "ongoing" if count > 0 else "resolved"
 
-    def alert_lifecycle_extract_severity(self, item) -> str:
-        if isinstance(item, dict):
-            for key in ["severity", "level", "priority", "risk", "impact"]:
-                value = item.get(key)
 
-                if value:
-                    return self.alert_lifecycle_norm(value)
+    def alert_lifecycle_extract_severity(self, *args, **kwargs):
+        """Extract useful severity instead of unknown."""
+        values = list(args) + list(kwargs.values())
+        raw = " ".join(str(v or "") for v in values).lower()
 
-        return "unknown"
+        try:
+            count = self.b3a_extract_count(raw, {})
+        except Exception:
+            count = 1
 
-    def alert_lifecycle_extract_identity(self, rule_name: str, item) -> str:
-        import hashlib
-        import json
+        if any(x in raw for x in ["audit_highrisk", "high_risk_audit_events", "bot_audit_highrisk", "/bot/audit/highrisk", "highrisk"]):
+            return "high"
+        if any(x in raw for x in ["security", "suspicious", "exploit", "compromise"]):
+            return "high"
+        if any(x in raw for x in ["billing_failed", "failed invoice", "chargeback"]):
+            return "high" if count >= 5 else "medium"
+        if count >= 20:
+            return "high"
+        if count >= 5:
+            return "medium"
 
-        if isinstance(item, dict):
-            for key in [
-                "id",
-                "uuid",
-                "alert_id",
-                "incident_id",
-                "ticket_id",
-                "invoice_id",
-                "session_id",
-                "audit_id",
-                "event_id",
-                "key",
-                "slug",
-                "name",
-                "title",
-                "subject",
-                "message",
-            ]:
-                value = item.get(key)
+        return "low"
 
-                if value:
-                    return f"{rule_name}:{self.alert_lifecycle_norm(value)}"
+    def alert_lifecycle_extract_identity(self, *args, **kwargs):
+        """Canonical lifecycle identity. Prevents same alert being reposted with new hash IDs."""
+        values = list(args) + list(kwargs.values())
+        return self.b3a_canonical_alert_key(*values)
 
-            try:
-                raw = json.dumps(item, sort_keys=True, default=str)
-            except Exception:
-                raw = str(item)
 
-            digest = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
-            return f"{rule_name}:hash:{digest}"
-
-        return f"{rule_name}:aggregate"
-
-    def alert_lifecycle_fingerprint(self, rule_name: str, item, count: int, status: str, severity: str) -> str:
-        import hashlib
-        import json
-
-        safe = {
-            "rule": rule_name,
-            "count": count,
-            "status": status,
-            "severity": severity,
-        }
-
-        if isinstance(item, dict):
-            for key in [
-                "id",
-                "uuid",
-                "alert_id",
-                "incident_id",
-                "ticket_id",
-                "invoice_id",
-                "session_id",
-                "audit_id",
-                "status",
-                "state",
-                "severity",
-                "level",
-                "priority",
-                "message",
-                "title",
-                "summary",
-                "name",
-            ]:
-                if key in item:
-                    safe[key] = item.get(key)
-        else:
-            safe["value"] = item
-
-        raw = json.dumps(safe, sort_keys=True, default=str)
-        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+    def alert_lifecycle_fingerprint(self, *args, **kwargs):
+        """Stable lifecycle fingerprint. Ignores volatile hash/timestamp noise."""
+        values = list(args) + list(kwargs.values())
+        return self.b3a_stable_alert_fingerprint(*values)
 
     async def alert_lifecycle_get(self) -> dict:
         cfg = await get_core_config(self.bot)
@@ -7091,6 +7040,82 @@ class MattisCore(commands.Cog):
 
 
 
+
+
+    def b3a_canonical_alert_key(self, *values) -> str:
+        """Return a stable alert ID. Same rule/endpoint = same alert, no random hash."""
+        import re
+        import hashlib
+
+        raw = " ".join(str(v or "") for v in values)
+        low = raw.lower()
+
+        mapping = [
+            (["audit_highrisk", "high_risk_audit_events", "bot_audit_highrisk", "/bot/audit/highrisk", "observatory_logs_audit_log"], "alert:audit_highrisk"),
+            (["support_critical", "/bot/support/critical"], "alert:support_critical"),
+            (["support_unassigned", "/bot/support/unassigned"], "alert:support_unassigned"),
+            (["billing_failed", "/bot/billing/failed", "failed_invoices"], "alert:billing_failed"),
+            (["billing_pastdue", "billing_past_due", "/bot/billing/pastdue", "past_due"], "alert:billing_pastdue"),
+            (["security_risks", "/bot/security/risks"], "alert:security_risks"),
+            (["security_suspicious", "/bot/security/suspicious"], "alert:security_suspicious"),
+            (["automation_failed", "/bot/automation/failed"], "alert:automation_failed"),
+            (["discord_broken", "/bot/discord/broken"], "alert:discord_broken"),
+            (["roblox_broken", "/bot/roblox/broken"], "alert:roblox_broken"),
+            (["incidents", "/bot/incidents"], "alert:incidents"),
+            (["api_down", "/health", "/bot/status"], "alert:api_health"),
+        ]
+
+        for needles, key in mapping:
+            if any(n in low for n in needles):
+                return key
+
+        # Fallback: remove volatile bits before hashing.
+        stable = low
+        stable = re.sub(r":hash:[a-f0-9]+", "", stable)
+        stable = re.sub(r"\bhash[:=\s]+[a-f0-9]{8,}\b", "", stable)
+        stable = re.sub(r"\b(first seen|last seen|last posted)[:\s]+[^\n]+", "", stable)
+        stable = re.sub(r"\b20\d\d-\d\d-\d\d[t ][0-9:.+\-z]+\b", "<time>", stable)
+        stable = re.sub(r"<t:\d+:[a-z]>", "<time>", stable)
+        stable = re.sub(r"\bcm[a-z0-9]{12,}\b", "<id>", stable)
+        stable = re.sub(r"\s+", " ", stable).strip()
+
+        digest = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
+        return f"alert:auto:{digest}"
+
+    def b3a_stable_alert_fingerprint(self, *values) -> str:
+        """Fingerprint only meaningful changes, not timestamps/hash noise."""
+        import re
+        import hashlib
+
+        raw = " ".join(str(v or "") for v in values)
+        low = raw.lower()
+
+        key = self.b3a_canonical_alert_key(raw)
+
+        count = 1
+        try:
+            count = self.b3a_extract_count(raw, {})
+        except Exception:
+            count = 1
+
+        severity = "unknown"
+        try:
+            if hasattr(self, "b3a_alert_profile"):
+                severity = self.b3a_alert_profile(raw, count).get("severity", "unknown")
+        except Exception:
+            severity = "unknown"
+
+        # Keep event/action/reason shape, but remove volatile lifecycle IDs/timestamps.
+        stable = low
+        stable = re.sub(r":hash:[a-f0-9]+", "", stable)
+        stable = re.sub(r"\balert id\s+[^\n]+", "", stable)
+        stable = re.sub(r"\b(first seen|last seen|last posted)[:\s]+[^\n]+", "", stable)
+        stable = re.sub(r"\b20\d\d-\d\d-\d\d[t ][0-9:.+\-z]+\b", "<time>", stable)
+        stable = re.sub(r"<t:\d+:[a-z]>", "<time>", stable)
+        stable = re.sub(r"\s+", " ", stable).strip()
+
+        base = f"{key}|count:{count}|severity:{severity}|{stable[:1500]}"
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
     def b3a_clean_alert_text(self, value: str) -> str:
         import re
@@ -7806,42 +7831,26 @@ class MattisCore(commands.Cog):
         raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest(), data
 
+
     async def b2_alert_identity(self, embed=None, content=None):
-        """Build the alert identity. Same issue = same identity, changed details = new fingerprint."""
-        import re
-        import hashlib
-        import json
+        """Build the alert identity. Same rule/endpoint always returns the same ID."""
+        parts = [str(content or "")]
 
-        fp, data = await self.b2_alert_embed_signature(embed=embed, content=content)
+        if embed is not None:
+            try:
+                parts.append(str(getattr(embed, "title", "") or ""))
+                parts.append(str(getattr(embed, "description", "") or ""))
 
-        # Prefer explicit alert IDs if the embed already contains one.
-        chunks = [
-            data.get("title", ""),
-            data.get("description", ""),
-            data.get("footer", ""),
-        ]
+                for field in getattr(embed, "fields", []) or []:
+                    parts.append(str(getattr(field, "name", "") or ""))
+                    parts.append(str(getattr(field, "value", "") or ""))
 
-        for name, value in data.get("fields", []):
-            if "alert id" in name.lower() or name.lower() in {"id", "key", "incident id"}:
-                if value:
-                    return "explicit:" + re.sub(r"\s+", "-", value.lower())[:120]
+                footer = getattr(embed, "footer", None)
+                parts.append(str(getattr(footer, "text", "") or ""))
+            except Exception:
+                parts.append(repr(embed))
 
-        joined = " ".join(chunks)
-
-        # Remove changing bits so repeated checks point at the same alert identity.
-        stable = joined.lower()
-        stable = re.sub(r"\b\d+\b", "<n>", stable)
-        stable = re.sub(r"\b(low|medium|high|critical|new|ongoing|updated|resolved|reopened)\b", "<state>", stable)
-        stable = re.sub(r"\b\d{4}-\d{2}-\d{2}[t ][0-9:.+\-z]+\b", "<time>", stable)
-        stable = re.sub(r"<t:\d+:[a-z]>", "<time>", stable)
-        stable = re.sub(r"\s+", " ", stable).strip()
-
-        if not stable:
-            stable = json.dumps(data, sort_keys=True, ensure_ascii=False)
-
-        digest = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
-        return f"auto:{digest}"
-
+        return self.b3a_canonical_alert_key(*parts)
 
     async def b2_alert_guarded_send(self, guild, channel, *args, **kwargs):
         """
