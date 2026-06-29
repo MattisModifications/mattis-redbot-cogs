@@ -2066,6 +2066,1866 @@ class MattisCore(commands.Cog):
         sections.extend([x.replace("**", "") for x in self.b9_handover_lines(snapshot)])
         return "\n".join(sections)
 
+
+    # ============================================================
+    # B11 — API Route Contract Centre
+    # ============================================================
+
+    def b11_default_contracts(self) -> dict:
+        return {
+            "/bot/support/critical": {
+                "required": True,
+                "required_keys": [],
+                "description": "Critical support feed for Discord bot operations.",
+            },
+            "/bot/support/unassigned": {
+                "required": True,
+                "required_keys": [],
+                "description": "Unassigned support feed.",
+            },
+            "/bot/billing/failed": {
+                "required": True,
+                "required_keys": [],
+                "description": "Failed billing events feed.",
+            },
+            "/bot/billing/pastdue": {
+                "required": True,
+                "required_keys": [],
+                "description": "Past-due billing/customer access feed.",
+            },
+            "/bot/audit/highrisk": {
+                "required": True,
+                "required_keys": [],
+                "description": "High-risk audit feed used by log/alert intelligence.",
+            },
+            "/bot/security/risks": {
+                "required": True,
+                "required_keys": [],
+                "description": "Security risk feed.",
+            },
+            "/bot/security/suspicious": {
+                "required": True,
+                "required_keys": [],
+                "description": "Suspicious security activity feed.",
+            },
+            "/bot/automation/failed": {
+                "required": True,
+                "required_keys": [],
+                "description": "Failed automation/workflow feed.",
+            },
+            "/bot/discord/broken": {
+                "required": True,
+                "required_keys": [],
+                "description": "Broken Discord integration feed.",
+            },
+            "/bot/roblox/broken": {
+                "required": True,
+                "required_keys": [],
+                "description": "Broken Roblox integration feed.",
+            },
+            "/bot/incidents": {
+                "required": False,
+                "required_keys": ["incidents", "count"],
+                "description": "Optional incident API route. Bot has its own incident store but API route is recommended.",
+            },
+            "/bot/backups/status": {
+                "required": False,
+                "required_keys": ["ok", "latest"],
+                "description": "Optional backup status route. Should expose safe metadata only.",
+            },
+        }
+
+    async def b11_get_contract_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("api_contract_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("contracts", {})
+        state.setdefault("history", [])
+
+        defaults = self.b11_default_contracts()
+
+        for endpoint, contract in defaults.items():
+            state["contracts"].setdefault(endpoint, dict(contract))
+
+        return state
+
+    async def b11_set_contract_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["api_contract_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b11_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b11_safe(self, value, limit: int = 900) -> str:
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    def b11_normalise_endpoint(self, endpoint: str) -> str:
+        endpoint = str(endpoint or "").strip()
+        return endpoint if endpoint.startswith("/") else "/" + endpoint
+
+    def b11_validate_payload(self, payload, required_keys: list[str]) -> tuple[bool, list[str]]:
+        if not required_keys:
+            return True, []
+
+        if not isinstance(payload, dict):
+            return False, ["payload is not a JSON object"]
+
+        missing = []
+
+        for key in required_keys:
+            if key not in payload:
+                missing.append(key)
+
+        return len(missing) == 0, missing
+
+    async def b11_check_one_contract(self, guild, endpoint: str, contract: dict) -> dict:
+        endpoint = self.b11_normalise_endpoint(endpoint)
+
+        if contract.get("ignored"):
+            return {
+                "endpoint": endpoint,
+                "ok": True,
+                "ignored": True,
+                "required": bool(contract.get("required")),
+                "status": "ignored",
+                "message": contract.get("ignored_reason") or "Ignored by configuration.",
+                "http": None,
+            }
+
+        if not hasattr(self, "b5_http_get"):
+            return {
+                "endpoint": endpoint,
+                "ok": False,
+                "ignored": False,
+                "required": bool(contract.get("required")),
+                "status": "unavailable",
+                "message": "HTTP helper unavailable.",
+                "http": None,
+            }
+
+        check = await self.b5_http_get(guild, endpoint, timeout_seconds=10)
+        required = bool(contract.get("required"))
+        required_keys = list(contract.get("required_keys") or [])
+
+        if not check.get("ok"):
+            if not required and int(check.get("status", 0) or 0) == 404:
+                return {
+                    "endpoint": endpoint,
+                    "ok": True,
+                    "ignored": False,
+                    "optional_missing": True,
+                    "required": False,
+                    "status": "optional_missing",
+                    "message": "Optional route is not implemented.",
+                    "http": check,
+                }
+
+            return {
+                "endpoint": endpoint,
+                "ok": False,
+                "ignored": False,
+                "required": required,
+                "status": "http_failed",
+                "message": f"HTTP {check.get('status')} — {check.get('error') or check.get('text_preview')}",
+                "http": check,
+            }
+
+        valid_payload, missing = self.b11_validate_payload(check.get("payload"), required_keys)
+
+        if not valid_payload:
+            return {
+                "endpoint": endpoint,
+                "ok": False,
+                "ignored": False,
+                "required": required,
+                "status": "contract_failed",
+                "message": "Missing/invalid keys: " + ", ".join(missing),
+                "http": check,
+            }
+
+        return {
+            "endpoint": endpoint,
+            "ok": True,
+            "ignored": False,
+            "required": required,
+            "status": "ok",
+            "message": "Contract satisfied.",
+            "http": check,
+        }
+
+    async def b11_check_contracts(self, guild, only_endpoint: str = "") -> list[dict]:
+        state = await self.b11_get_contract_state(guild)
+        contracts = state.get("contracts") or {}
+
+        results = []
+
+        for endpoint, contract in contracts.items():
+            if only_endpoint and self.b11_normalise_endpoint(endpoint) != self.b11_normalise_endpoint(only_endpoint):
+                continue
+
+            results.append(await self.b11_check_one_contract(guild, endpoint, contract))
+
+        return results
+
+    def b11_contract_result_lines(self, results: list[dict]) -> list[str]:
+        lines = []
+
+        for item in results:
+            endpoint = item.get("endpoint")
+            required = "required" if item.get("required") else "optional"
+
+            if item.get("ignored"):
+                lines.append(f"⚪ `{endpoint}` — `{required}` — ignored — {item.get('message')}")
+            elif item.get("ok") and item.get("optional_missing"):
+                lines.append(f"🟡 `{endpoint}` — optional missing — {item.get('message')}")
+            elif item.get("ok"):
+                http = item.get("http") or {}
+                lines.append(f"✅ `{endpoint}` — `{required}` — HTTP `{http.get('status', 'n/a')}` — {http.get('elapsed_ms', 0)}ms")
+            else:
+                lines.append(f"❌ `{endpoint}` — `{required}` — {item.get('status')} — {item.get('message')}")
+
+        return lines
+
+    def b11_contract_summary(self, results: list[dict]) -> dict:
+        return {
+            "total": len(results),
+            "ok": sum(1 for x in results if x.get("ok")),
+            "failed": sum(1 for x in results if not x.get("ok")),
+            "required_failed": sum(1 for x in results if not x.get("ok") and x.get("required")),
+            "optional_missing": sum(1 for x in results if x.get("optional_missing")),
+            "ignored": sum(1 for x in results if x.get("ignored")),
+        }
+
+    def b11_contract_export_text(self, state: dict, results: list[dict]) -> str:
+        lines = [
+            "Mattis CMS | Systems",
+            "API Route Contract Report",
+            "=" * 40,
+            "",
+        ]
+
+        summary = self.b11_contract_summary(results)
+
+        lines.extend([
+            f"Total contracts: {summary['total']}",
+            f"OK: {summary['ok']}",
+            f"Failed: {summary['failed']}",
+            f"Required failed: {summary['required_failed']}",
+            f"Optional missing: {summary['optional_missing']}",
+            f"Ignored: {summary['ignored']}",
+            "",
+            "Results",
+            "-" * 40,
+        ])
+
+        for item in results:
+            lines.append(f"{item.get('endpoint')} — {item.get('status')} — {item.get('message')}")
+
+        lines.extend(["", "Contracts", "-" * 40])
+
+        for endpoint, contract in (state.get("contracts") or {}).items():
+            lines.extend([
+                endpoint,
+                f"  Required: {contract.get('required')}",
+                f"  Required keys: {', '.join(contract.get('required_keys') or []) or 'None'}",
+                f"  Description: {contract.get('description') or ''}",
+                f"  Ignored: {contract.get('ignored', False)}",
+                "",
+            ])
+
+        return "\n".join(lines)
+
+    @mcore.group(name="contract", invoke_without_command=True)
+    async def contract(self, ctx):
+        """API route contract centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**API Route Contract Centre**",
+            "",
+            "`!mcore contract list` — list route contracts",
+            "`!mcore contract show <endpoint>` — show one contract",
+            "`!mcore contract check [endpoint]` — check all or one contract",
+            "`!mcore contract drift` — show contract drift/failures",
+            "`!mcore contract add <endpoint> <keys> <description>` — add/update contract",
+            "`!mcore contract require <endpoint> <keys>` — require JSON keys",
+            "`!mcore contract optional <endpoint>` — mark endpoint optional",
+            "`!mcore contract required <endpoint>` — mark endpoint required",
+            "`!mcore contract ignore <endpoint> <reason>` — ignore contract",
+            "`!mcore contract unignore <endpoint>` — stop ignoring contract",
+            "`!mcore contract implementation <endpoint>` — API implementation hint",
+            "`!mcore contract export` — export contract report",
+        ]
+
+        await self.send_paginated(ctx, "API Contracts", lines)
+
+    @contract.command(name="list")
+    async def contract_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.get("contracts") or {}
+
+        lines = []
+
+        for endpoint, contract in sorted(contracts.items()):
+            req = "required" if contract.get("required") else "optional"
+            ignored = " ignored" if contract.get("ignored") else ""
+            keys = ", ".join(contract.get("required_keys") or []) or "no required keys"
+            lines.append(f"`{endpoint}` — `{req}`{ignored} — {keys}")
+
+        await self.send_paginated(ctx, "API Contract List", lines)
+
+    @contract.command(name="show")
+    async def contract_show(self, ctx, endpoint: str):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contract = (state.get("contracts") or {}).get(endpoint)
+
+        if not contract:
+            await ctx.send(embed=info_embed("Contract not found", f"No contract exists for `{endpoint}`."))
+            return
+
+        lines = [
+            f"Endpoint: `{endpoint}`",
+            f"Required: `{bool(contract.get('required'))}`",
+            f"Ignored: `{bool(contract.get('ignored'))}`",
+            f"Required keys: `{', '.join(contract.get('required_keys') or []) or 'none'}`",
+            f"Description: {contract.get('description') or 'No description.'}",
+        ]
+
+        if contract.get("ignored"):
+            lines.append(f"Ignore reason: {contract.get('ignored_reason') or 'No reason.'}")
+
+        await self.send_paginated(ctx, "API Contract", lines)
+
+    @contract.command(name="check")
+    async def contract_check(self, ctx, endpoint: str = ""):
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b11_check_contracts(ctx.guild, endpoint)
+        summary = self.b11_contract_summary(results)
+
+        lines = [
+            f"Contracts checked: `{summary['total']}`",
+            f"OK: `{summary['ok']}`",
+            f"Failed: `{summary['failed']}`",
+            f"Required failed: `{summary['required_failed']}`",
+            f"Optional missing: `{summary['optional_missing']}`",
+            f"Ignored: `{summary['ignored']}`",
+            "",
+        ]
+
+        lines.extend(self.b11_contract_result_lines(results))
+
+        await self.send_paginated(ctx, "API Contract Check", lines)
+
+    @contract.command(name="drift")
+    async def contract_drift(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b11_check_contracts(ctx.guild)
+        drift = [x for x in results if not x.get("ok") or x.get("optional_missing")]
+
+        if not drift:
+            await ctx.send(embed=ok_embed("API Contract Drift", "No contract drift detected."))
+            return
+
+        lines = [
+            f"Drift items: `{len(drift)}`",
+            "",
+        ]
+        lines.extend(self.b11_contract_result_lines(drift))
+
+        await self.send_paginated(ctx, "API Contract Drift", lines)
+
+    @contract.command(name="add")
+    async def contract_add(self, ctx, endpoint: str, keys: str = "-", *, description: str = ""):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.setdefault("contracts", {})
+
+        required_keys = [] if keys in ["-", "none", "None", ""] else [x.strip() for x in keys.split(",") if x.strip()]
+
+        contracts[endpoint] = {
+            "required": True,
+            "required_keys": required_keys,
+            "description": description or "Custom API contract.",
+            "created_by": str(ctx.author),
+            "updated_at": self.b11_now_iso(),
+        }
+
+        await self.b11_set_contract_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("API contract saved", f"`{endpoint}` saved."))
+
+    @contract.command(name="require")
+    async def contract_require(self, ctx, endpoint: str, keys: str):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.setdefault("contracts", {})
+
+        contract = contracts.setdefault(endpoint, {
+            "required": True,
+            "required_keys": [],
+            "description": "Custom API contract.",
+        })
+
+        contract["required_keys"] = [x.strip() for x in keys.split(",") if x.strip()]
+        contract["updated_by"] = str(ctx.author)
+        contract["updated_at"] = self.b11_now_iso()
+
+        await self.b11_set_contract_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Required keys updated", f"`{endpoint}` now requires `{', '.join(contract['required_keys']) or 'none'}`."))
+
+    @contract.command(name="optional")
+    async def contract_optional(self, ctx, endpoint: str):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.setdefault("contracts", {})
+        contract = contracts.setdefault(endpoint, {"required": False, "required_keys": [], "description": "Custom optional contract."})
+        contract["required"] = False
+        contract["updated_by"] = str(ctx.author)
+        contract["updated_at"] = self.b11_now_iso()
+
+        await self.b11_set_contract_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Contract marked optional", f"`{endpoint}` is now optional."))
+
+    @contract.command(name="required")
+    async def contract_required(self, ctx, endpoint: str):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.setdefault("contracts", {})
+        contract = contracts.setdefault(endpoint, {"required": True, "required_keys": [], "description": "Custom required contract."})
+        contract["required"] = True
+        contract["updated_by"] = str(ctx.author)
+        contract["updated_at"] = self.b11_now_iso()
+
+        await self.b11_set_contract_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Contract marked required", f"`{endpoint}` is now required."))
+
+    @contract.command(name="ignore")
+    async def contract_ignore(self, ctx, endpoint: str, *, reason: str = "Ignored by admin."):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.setdefault("contracts", {})
+        contract = contracts.setdefault(endpoint, {"required": False, "required_keys": [], "description": "Custom contract."})
+        contract["ignored"] = True
+        contract["ignored_reason"] = self.b11_safe(reason, 600)
+        contract["ignored_by"] = str(ctx.author)
+        contract["ignored_at"] = self.b11_now_iso()
+
+        await self.b11_set_contract_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Contract ignored", f"`{endpoint}` ignored.\nReason: {reason}"))
+
+    @contract.command(name="unignore")
+    async def contract_unignore(self, ctx, endpoint: str):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+        state = await self.b11_get_contract_state(ctx.guild)
+        contracts = state.setdefault("contracts", {})
+        contract = contracts.get(endpoint)
+
+        if not contract:
+            await ctx.send(embed=info_embed("Contract not found", f"No contract found for `{endpoint}`."))
+            return
+
+        contract["ignored"] = False
+        contract["unignored_by"] = str(ctx.author)
+        contract["unignored_at"] = self.b11_now_iso()
+
+        await self.b11_set_contract_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Contract unignored", f"`{endpoint}` is active again."))
+
+    @contract.command(name="implementation")
+    async def contract_implementation(self, ctx, endpoint: str):
+        if not await require_admin(ctx):
+            return
+
+        endpoint = self.b11_normalise_endpoint(endpoint)
+
+        if endpoint == "/bot/incidents":
+            lines = [
+                "**Implementation hint for `GET /bot/incidents`**",
+                "",
+                "Expected HTTP: `200`",
+                "Expected safe JSON:",
+                "```json",
+                '{ "incidents": [], "count": 0 }',
+                "```",
+                "Do not return secrets, raw customer data, private notes, or internal stack traces.",
+            ]
+        elif endpoint == "/bot/backups/status":
+            lines = [
+                "**Implementation hint for `GET /bot/backups/status`**",
+                "",
+                "Expected HTTP: `200`",
+                "Expected safe JSON:",
+                "```json",
+                '{ "ok": true, "latest": { "createdAt": "2026-06-29T00:00:00.000Z", "type": "postgres", "verified": true }, "retentionDays": 14 }',
+                "```",
+                "Return metadata only. Do not return backup file contents, DB URLs, tokens, or absolute secret paths.",
+            ]
+        else:
+            lines = [
+                f"**Implementation hint for `{endpoint}`**",
+                "",
+                "Expected HTTP: `200`",
+                "Expected body: safe JSON response matching the contract required keys.",
+                "",
+                "Use `!mcore contract show <endpoint>` to view required keys.",
+            ]
+
+        await self.send_paginated(ctx, "API Implementation Hint", lines)
+
+    @contract.command(name="export")
+    async def contract_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b11_get_contract_state(ctx.guild)
+        results = await self.b11_check_contracts(ctx.guild)
+        report = self.b11_contract_export_text(state, results)
+
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("API contract report exported", "Exported API route contract report."),
+            file=discord.File(fp, filename="mattis-api-contract-report.txt")
+        )
+
+    # ============================================================
+    # B12 — Backup Verification Centre
+    # ============================================================
+
+    async def b12_get_backup_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("backup_verification_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("manual_verifications", [])
+        state.setdefault("restore_tests", [])
+        state.setdefault("signoffs", {})
+        state.setdefault("notes", [])
+
+        return state
+
+    async def b12_set_backup_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["backup_verification_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b12_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b12_parse_iso(self, value):
+        from datetime import datetime, timezone
+
+        if not value:
+            return None
+
+        try:
+            text = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            return dt
+        except Exception:
+            return None
+
+    def b12_days_since(self, value) -> int | None:
+        from datetime import datetime, timezone
+
+        dt = self.b12_parse_iso(value)
+
+        if not dt:
+            return None
+
+        return max(0, int((datetime.now(timezone.utc) - dt).total_seconds() // 86400))
+
+    async def b12_check_backup_api(self, guild) -> list[dict]:
+        endpoints = [
+            "/bot/backups/status",
+            "/bot/backup/status",
+            "/backups/status",
+            "/health/backups",
+        ]
+
+        results = []
+
+        if not hasattr(self, "b5_http_get"):
+            return results
+
+        for endpoint in endpoints:
+            results.append(await self.b5_http_get(guild, endpoint, timeout_seconds=8))
+
+        return results
+
+    def b12_latest_pass(self, items: list[dict]) -> dict | None:
+        passed = [x for x in items if str(x.get("result", "")).lower() in ["pass", "passed", "ok", "success", "verified"]]
+
+        if not passed:
+            return None
+
+        passed.sort(key=lambda x: str(x.get("at", "")), reverse=True)
+        return passed[0]
+
+    def b12_backup_readiness_from_state(self, state: dict, api_results: list[dict] | None = None) -> dict:
+        api_results = api_results or []
+        api_ok = any(x.get("ok") for x in api_results)
+
+        latest_verify = self.b12_latest_pass(state.get("manual_verifications") or [])
+        latest_restore = self.b12_latest_pass(state.get("restore_tests") or [])
+
+        verify_days = self.b12_days_since(latest_verify.get("at")) if latest_verify else None
+        restore_days = self.b12_days_since(latest_restore.get("at")) if latest_restore else None
+
+        signoffs = state.get("signoffs") or {}
+
+        blockers = []
+        warnings = []
+
+        if not api_ok:
+            warnings.append("No backup status API endpoint currently returns HTTP 2xx.")
+
+        if not latest_verify:
+            blockers.append("No manual backup verification has been recorded.")
+        elif verify_days is not None and verify_days > 7:
+            warnings.append(f"Latest manual backup verification is {verify_days} day(s) old.")
+
+        if not latest_restore:
+            blockers.append("No restore test has been recorded.")
+        elif restore_days is not None and restore_days > 30:
+            warnings.append(f"Latest restore test is {restore_days} day(s) old.")
+
+        if "Ops" not in signoffs:
+            warnings.append("Ops backup sign-off is missing.")
+
+        if "Security" not in signoffs:
+            warnings.append("Security backup sign-off is missing.")
+
+        score = 100
+        score -= min(60, len(blockers) * 25)
+        score -= min(30, len(warnings) * 8)
+
+        label = "Verified" if score >= 90 and not blockers else "Mostly verified" if score >= 75 and not blockers else "Needs review" if score >= 50 else "Not verified"
+
+        return {
+            "score": max(0, score),
+            "label": label,
+            "api_ok": api_ok,
+            "latest_verify": latest_verify,
+            "latest_restore": latest_restore,
+            "verify_days": verify_days,
+            "restore_days": restore_days,
+            "signoffs": signoffs,
+            "blockers": blockers,
+            "warnings": warnings,
+        }
+
+    async def b12_backup_readiness(self, guild) -> dict:
+        state = await self.b12_get_backup_state(guild)
+        api_results = await self.b12_check_backup_api(guild)
+        readiness = self.b12_backup_readiness_from_state(state, api_results)
+
+        return {
+            "state": state,
+            "api_results": api_results,
+            "readiness": readiness,
+        }
+
+    def b12_readiness_lines(self, data: dict) -> list[str]:
+        readiness = data.get("readiness") or {}
+        state = data.get("state") or {}
+        api_results = data.get("api_results") or []
+
+        lines = [
+            "**Backup Verification Readiness**",
+            "",
+            f"Status: `{readiness.get('label')}`",
+            f"Score: `{readiness.get('score')}/100`",
+            f"Backup API healthy: `{'yes' if readiness.get('api_ok') else 'no'}`",
+            "",
+            "**Latest manual verification:**",
+        ]
+
+        latest_verify = readiness.get("latest_verify")
+
+        if latest_verify:
+            lines.extend([
+                f"At: `{latest_verify.get('at')}`",
+                f"Type: `{latest_verify.get('type')}`",
+                f"By: `{latest_verify.get('by')}`",
+                f"Note: {latest_verify.get('note')}",
+            ])
+        else:
+            lines.append("None recorded.")
+
+        lines.extend(["", "**Latest restore test:**"])
+
+        latest_restore = readiness.get("latest_restore")
+
+        if latest_restore:
+            lines.extend([
+                f"At: `{latest_restore.get('at')}`",
+                f"Result: `{latest_restore.get('result')}`",
+                f"By: `{latest_restore.get('by')}`",
+                f"Note: {latest_restore.get('note')}",
+            ])
+        else:
+            lines.append("None recorded.")
+
+        lines.extend(["", "**Sign-offs:**"])
+
+        signoffs = state.get("signoffs") or {}
+
+        if signoffs:
+            for area, item in signoffs.items():
+                lines.append(f"- `{area}` by `{item.get('by')}` at `{item.get('at')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Blockers:**"])
+
+        if readiness.get("blockers"):
+            for item in readiness.get("blockers"):
+                lines.append(f"- 🚫 {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Warnings:**"])
+
+        if readiness.get("warnings"):
+            for item in readiness.get("warnings"):
+                lines.append(f"- ⚠️ {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Backup endpoint checks:**"])
+
+        if hasattr(self, "b5_check_lines"):
+            lines.extend(self.b5_check_lines(api_results))
+        else:
+            for item in api_results:
+                lines.append(f"{item.get('endpoint')} — {item.get('status')}")
+
+        return lines
+
+    def b12_export_text(self, data: dict) -> str:
+        return "\n".join([x.replace("**", "") for x in self.b12_readiness_lines(data)])
+
+    @mcore.group(name="backup", invoke_without_command=True)
+    async def backup(self, ctx):
+        """Backup verification centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Backup Verification Centre**",
+            "",
+            "`!mcore backup status` — backup verification status",
+            "`!mcore backup verify <type> <note>` — record manual backup verification",
+            "`!mcore backup restore-test <pass/fail> <note>` — record restore test",
+            "`!mcore backup signoff <area> <note>` — add backup sign-off",
+            "`!mcore backup history` — backup verification history",
+            "`!mcore backup readiness` — backup readiness gate",
+            "`!mcore backup commands` — VPS backup commands",
+            "`!mcore backup export` — export backup verification report",
+        ]
+
+        await self.send_paginated(ctx, "Backup Verification", lines)
+
+    @backup.command(name="status")
+    async def backup_status(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b12_backup_readiness(ctx.guild)
+        await self.send_paginated(ctx, "Backup Status", self.b12_readiness_lines(data))
+
+    @backup.command(name="readiness")
+    async def backup_readiness(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b12_backup_readiness(ctx.guild)
+        await self.send_paginated(ctx, "Backup Readiness", self.b12_readiness_lines(data))
+
+    @backup.command(name="verify")
+    async def backup_verify(self, ctx, backup_type: str = "postgres", *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b12_get_backup_state(ctx.guild)
+        items = state.get("manual_verifications") or []
+
+        items.append({
+            "at": self.b12_now_iso(),
+            "type": self.b11_safe(backup_type, 100) if hasattr(self, "b11_safe") else str(backup_type)[:100],
+            "result": "verified",
+            "by": str(ctx.author),
+            "note": self.b11_safe(note, 1000) if hasattr(self, "b11_safe") else str(note)[:1000],
+        })
+
+        state["manual_verifications"] = items[-50:]
+        await self.b12_set_backup_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Backup verification recorded", f"`{backup_type}` verification recorded."))
+
+    @backup.command(name="restore-test")
+    async def backup_restore_test(self, ctx, result: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b12_get_backup_state(ctx.guild)
+        items = state.get("restore_tests") or []
+
+        result_l = str(result or "").lower().strip()
+        normal = "pass" if result_l in ["pass", "passed", "ok", "success", "verified"] else "fail"
+
+        items.append({
+            "at": self.b12_now_iso(),
+            "result": normal,
+            "by": str(ctx.author),
+            "note": self.b11_safe(note, 1200) if hasattr(self, "b11_safe") else str(note)[:1200],
+        })
+
+        state["restore_tests"] = items[-50:]
+        await self.b12_set_backup_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Restore test recorded", f"Restore test result: `{normal}`."))
+
+    @backup.command(name="signoff")
+    async def backup_signoff(self, ctx, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b12_get_backup_state(ctx.guild)
+        signoffs = state.get("signoffs") or {}
+        area = str(area or "Ops").title()
+
+        signoffs[area] = {
+            "at": self.b12_now_iso(),
+            "by": str(ctx.author),
+            "note": self.b11_safe(note, 1200) if hasattr(self, "b11_safe") else str(note)[:1200],
+        }
+
+        state["signoffs"] = signoffs
+        await self.b12_set_backup_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Backup sign-off recorded", f"`{area}` sign-off recorded."))
+
+    @backup.command(name="history")
+    async def backup_history(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b12_get_backup_state(ctx.guild)
+        lines = ["**Manual verifications:**"]
+
+        verifications = state.get("manual_verifications") or []
+
+        if verifications:
+            for item in verifications[-20:]:
+                lines.append(f"- `{item.get('at')}` — `{item.get('type')}` — `{item.get('result')}` by `{item.get('by')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Restore tests:**"])
+
+        tests = state.get("restore_tests") or []
+
+        if tests:
+            for item in tests[-20:]:
+                lines.append(f"- `{item.get('at')}` — `{item.get('result')}` by `{item.get('by')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "Backup History", lines)
+
+    @backup.command(name="commands")
+    async def backup_commands(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        if hasattr(self, "b6_backup_plan_lines"):
+            lines = self.b6_backup_plan_lines()
+        else:
+            lines = [
+                "**Backup commands unavailable**",
+                "B6 backup runbook helpers were not found.",
+            ]
+
+        await self.send_paginated(ctx, "Backup Commands", lines)
+
+    @backup.command(name="export")
+    async def backup_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b12_backup_readiness(ctx.guild)
+        report = self.b12_export_text(data)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Backup report exported", "Exported backup verification report."),
+            file=discord.File(fp, filename="mattis-backup-verification-report.txt")
+        )
+
+    # ============================================================
+    # B13 — Release Manager
+    # ============================================================
+
+    async def b13_get_release_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("release_manager") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("releases", {})
+
+        return state
+
+    async def b13_set_release_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["release_manager"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b13_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b13_new_release_id(self, state: dict) -> str:
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"REL-{state['counter']:04d}"
+
+    def b13_add_timeline(self, release: dict, action: str, actor: str, details: str = "") -> dict:
+        timeline = release.get("timeline") or []
+
+        timeline.append({
+            "at": self.b13_now_iso(),
+            "action": self.b11_safe(action, 120) if hasattr(self, "b11_safe") else str(action)[:120],
+            "actor": self.b11_safe(actor, 160) if hasattr(self, "b11_safe") else str(actor)[:160],
+            "details": self.b11_safe(details, 1400) if hasattr(self, "b11_safe") else str(details)[:1400],
+        })
+
+        release["timeline"] = timeline[-100:]
+        release["updated_at"] = self.b13_now_iso()
+
+        return release
+
+    async def b13_find_release(self, guild, query: str):
+        state = await self.b13_get_release_state(guild)
+        releases = state.get("releases") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in releases:
+            key = q.upper()
+            return key, releases[key], state
+
+        for key, item in releases.items():
+            haystack = " ".join([
+                key,
+                str(item.get("name", "")),
+                str(item.get("status", "")),
+                str(item.get("notes", "")),
+            ]).lower()
+
+            if q and q in haystack:
+                return key, item, state
+
+        return None, None, state
+
+    async def b13_release_preflight_data(self, guild, release: dict) -> dict:
+        prod = None
+        contracts = []
+        backup = None
+
+        if hasattr(self, "b5_build_readiness"):
+            prod = await self.b5_build_readiness(guild, include_optional=False)
+
+        if hasattr(self, "b11_check_contracts"):
+            contracts = await self.b11_check_contracts(guild)
+
+        if hasattr(self, "b12_backup_readiness"):
+            backup = await self.b12_backup_readiness(guild)
+
+        return {
+            "prod": prod,
+            "contracts": contracts,
+            "backup": backup,
+            "release": release,
+        }
+
+    def b13_release_preflight_lines(self, release_id: str, data: dict) -> list[str]:
+        release = data.get("release") or {}
+        prod = data.get("prod") or {}
+        readiness = prod.get("readiness") or {}
+        contracts = data.get("contracts") or []
+        contract_summary = self.b11_contract_summary(contracts) if hasattr(self, "b11_contract_summary") else {"required_failed": 0, "failed": 0, "ok": 0, "total": 0}
+        backup = data.get("backup") or {}
+        backup_readiness = backup.get("readiness") or {}
+
+        blockers = []
+        warnings = []
+
+        if release.get("blocked"):
+            blockers.append(f"Release is manually blocked: {release.get('blocked_reason')}")
+
+        for item in readiness.get("blockers") or []:
+            blockers.append(f"Production blocker: {item}")
+
+        if contract_summary.get("required_failed", 0):
+            blockers.append(f"{contract_summary.get('required_failed')} required API contract(s) failed.")
+
+        if backup_readiness and backup_readiness.get("blockers"):
+            blockers.extend([f"Backup blocker: {x}" for x in backup_readiness.get("blockers")])
+
+        for item in readiness.get("warnings") or []:
+            warnings.append(f"Production warning: {item}")
+
+        if contract_summary.get("optional_missing", 0):
+            warnings.append(f"{contract_summary.get('optional_missing')} optional API contract(s) are missing.")
+
+        if backup_readiness:
+            for item in backup_readiness.get("warnings") or []:
+                warnings.append(f"Backup warning: {item}")
+
+        approvals = release.get("approvals") or {}
+
+        lines = [
+            f"**Release Preflight — `{release_id}`**",
+            "",
+            f"Name: {release.get('name')}",
+            f"Status: `{release.get('status')}`",
+            f"Production readiness: `{readiness.get('label', 'Unknown')}` `{readiness.get('score', 'Unknown')}/100`",
+            f"API contracts: `{contract_summary.get('ok')}/{contract_summary.get('total')}` OK | Required failed `{contract_summary.get('required_failed')}`",
+            f"Backup readiness: `{backup_readiness.get('label', 'Unknown')}` `{backup_readiness.get('score', 'Unknown')}/100`",
+            "",
+            "**Approvals:**",
+        ]
+
+        if approvals:
+            for area, item in approvals.items():
+                lines.append(f"- `{area}` by `{item.get('by')}` at `{item.get('at')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Blockers:**"])
+
+        if blockers:
+            for blocker in blockers:
+                lines.append(f"- 🚫 {blocker}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Warnings:**"])
+
+        if warnings:
+            for warning in warnings:
+                lines.append(f"- ⚠️ {warning}")
+        else:
+            lines.append("- None")
+
+        pass_state = len(blockers) == 0
+
+        lines.extend([
+            "",
+            f"Preflight result: `{'PASS' if pass_state else 'BLOCKED'}`",
+        ])
+
+        return lines
+
+    def b13_release_report_text(self, release_id: str, release: dict) -> str:
+        lines = [
+            "Mattis CMS | Systems",
+            f"Release Report — {release_id}",
+            "=" * 40,
+            "",
+            f"Name: {release.get('name')}",
+            f"Status: {release.get('status')}",
+            f"Created: {release.get('created_at')}",
+            f"Updated: {release.get('updated_at')}",
+            "",
+            "Approvals",
+            "-" * 40,
+        ]
+
+        approvals = release.get("approvals") or {}
+
+        if approvals:
+            for area, item in approvals.items():
+                lines.append(f"{area}: {item.get('by')} at {item.get('at')} — {item.get('note')}")
+        else:
+            lines.append("None")
+
+        lines.extend(["", "Timeline", "-" * 40])
+
+        for item in release.get("timeline") or []:
+            lines.append(f"{item.get('at')} — {item.get('action')} by {item.get('actor')} — {item.get('details')}")
+
+        return "\n".join(lines)
+
+    @mcore.group(name="release", invoke_without_command=True)
+    async def release(self, ctx):
+        """Release manager."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Release Manager**",
+            "",
+            "`!mcore release start <name>` — create release record",
+            "`!mcore release list` — list releases",
+            "`!mcore release show <id/query>` — show release",
+            "`!mcore release note <id/query> <note>` — add release note",
+            "`!mcore release approve <id/query> <area> <note>` — add approval",
+            "`!mcore release block <id/query> <reason>` — block release",
+            "`!mcore release unblock <id/query> <reason>` — unblock release",
+            "`!mcore release preflight <id/query>` — release preflight",
+            "`!mcore release deploy <id/query> <note>` — mark deploying",
+            "`!mcore release rollback <id/query> <reason>` — mark rollback",
+            "`!mcore release complete <id/query> <note>` — complete release",
+            "`!mcore release history` — release history",
+            "`!mcore release export <id/query>` — export release report",
+        ]
+
+        await self.send_paginated(ctx, "Release Manager", lines)
+
+    @release.command(name="start")
+    async def release_start(self, ctx, *, name: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b13_get_release_state(ctx.guild)
+        release_id = self.b13_new_release_id(state)
+
+        item = {
+            "id": release_id,
+            "name": self.b11_safe(name, 240) if hasattr(self, "b11_safe") else str(name)[:240],
+            "status": "planning",
+            "created_at": self.b13_now_iso(),
+            "updated_at": self.b13_now_iso(),
+            "created_by": str(ctx.author),
+            "approvals": {},
+            "timeline": [],
+            "blocked": False,
+        }
+
+        item = self.b13_add_timeline(item, "created", str(ctx.author), name)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release created", f"`{release_id}` — {name}"))
+
+    @release.command(name="list")
+    async def release_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b13_get_release_state(ctx.guild)
+        releases = state.get("releases") or {}
+
+        if not releases:
+            await ctx.send(embed=info_embed("Releases", "No releases recorded yet."))
+            return
+
+        lines = []
+
+        for release_id, item in sorted(releases.items(), reverse=True):
+            blocked = " 🚫 blocked" if item.get("blocked") else ""
+            lines.append(f"`{release_id}` — `{item.get('status')}`{blocked} — {item.get('name')}")
+
+        await self.send_paginated(ctx, "Releases", lines)
+
+    @release.command(name="show")
+    async def release_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, _ = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        lines = [
+            f"**{release_id} — {item.get('name')}**",
+            f"Status: `{item.get('status')}`",
+            f"Created: `{item.get('created_at')}`",
+            f"Updated: `{item.get('updated_at')}`",
+            f"Blocked: `{'yes' if item.get('blocked') else 'no'}`",
+        ]
+
+        if item.get("blocked"):
+            lines.append(f"Block reason: {item.get('blocked_reason')}")
+
+        lines.extend(["", "**Approvals:**"])
+
+        approvals = item.get("approvals") or {}
+
+        if approvals:
+            for area, app in approvals.items():
+                lines.append(f"- `{area}` by `{app.get('by')}` — {app.get('note')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Timeline:**"])
+
+        for event in (item.get("timeline") or [])[-15:]:
+            lines.append(f"- `{event.get('at')}` — `{event.get('action')}` by `{event.get('actor')}` — {event.get('details')}")
+
+        await self.send_paginated(ctx, "Release Detail", lines)
+
+    @release.command(name="note")
+    async def release_note(self, ctx, query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        item = self.b13_add_timeline(item, "note", str(ctx.author), note)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release note added", f"`{release_id}` updated."))
+
+    @release.command(name="approve")
+    async def release_approve(self, ctx, query: str, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        area = str(area or "Ops").title()
+        approvals = item.get("approvals") or {}
+
+        approvals[area] = {
+            "by": str(ctx.author),
+            "at": self.b13_now_iso(),
+            "note": self.b11_safe(note, 1200) if hasattr(self, "b11_safe") else str(note)[:1200],
+        }
+
+        item["approvals"] = approvals
+        item = self.b13_add_timeline(item, "approval_added", str(ctx.author), f"{area}: {note}")
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release approval added", f"`{release_id}` approved for `{area}`."))
+
+    @release.command(name="block")
+    async def release_block(self, ctx, query: str, *, reason: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        item["blocked"] = True
+        item["blocked_reason"] = self.b11_safe(reason, 1200) if hasattr(self, "b11_safe") else str(reason)[:1200]
+        item["blocked_by"] = str(ctx.author)
+        item["blocked_at"] = self.b13_now_iso()
+        item = self.b13_add_timeline(item, "blocked", str(ctx.author), reason)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release blocked", f"`{release_id}` blocked."))
+
+    @release.command(name="unblock")
+    async def release_unblock(self, ctx, query: str, *, reason: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        item["blocked"] = False
+        item["unblocked_by"] = str(ctx.author)
+        item["unblocked_at"] = self.b13_now_iso()
+        item = self.b13_add_timeline(item, "unblocked", str(ctx.author), reason)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release unblocked", f"`{release_id}` unblocked."))
+
+    @release.command(name="preflight")
+    async def release_preflight(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, _ = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        data = await self.b13_release_preflight_data(ctx.guild, item)
+        await self.send_paginated(ctx, "Release Preflight", self.b13_release_preflight_lines(release_id, data))
+
+    @release.command(name="deploy")
+    async def release_deploy(self, ctx, query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        item["status"] = "deploying"
+        item = self.b13_add_timeline(item, "deploying", str(ctx.author), note)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release marked deploying", f"`{release_id}` is now deploying."))
+
+    @release.command(name="rollback")
+    async def release_rollback(self, ctx, query: str, *, reason: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        item["status"] = "rollback"
+        item["rollback_reason"] = self.b11_safe(reason, 1200) if hasattr(self, "b11_safe") else str(reason)[:1200]
+        item = self.b13_add_timeline(item, "rollback", str(ctx.author), reason)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release marked rollback", f"`{release_id}` is now marked for rollback."))
+
+    @release.command(name="complete")
+    async def release_complete(self, ctx, query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        release_id, item, state = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        item["status"] = "completed"
+        item["completed_at"] = self.b13_now_iso()
+        item["completed_by"] = str(ctx.author)
+        item = self.b13_add_timeline(item, "completed", str(ctx.author), note)
+        state["releases"][release_id] = item
+
+        await self.b13_set_release_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Release completed", f"`{release_id}` completed."))
+
+    @release.command(name="history")
+    async def release_history(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b13_get_release_state(ctx.guild)
+        releases = state.get("releases") or {}
+
+        if not releases:
+            await ctx.send(embed=info_embed("Release History", "No releases recorded yet."))
+            return
+
+        lines = []
+
+        for release_id, item in sorted(releases.items(), reverse=True):
+            lines.extend([
+                f"**{release_id} — {item.get('name')}**",
+                f"Status: `{item.get('status')}` | Created: `{item.get('created_at')}` | Updated: `{item.get('updated_at')}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Release History", lines)
+
+    @release.command(name="export")
+    async def release_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        release_id, item, _ = await self.b13_find_release(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{query}`."))
+            return
+
+        report = self.b13_release_report_text(release_id, item)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Release report exported", f"Exported `{release_id}` report."),
+            file=discord.File(fp, filename=f"mattis-release-{release_id.lower()}.txt")
+        )
+
+    # ============================================================
+    # B14 — Evidence Vault / Compliance Trail
+    # ============================================================
+
+    async def b14_get_evidence_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("evidence_vault") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("records", {})
+
+        return state
+
+    async def b14_set_evidence_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["evidence_vault"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b14_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b14_new_evidence_id(self, state: dict) -> str:
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"EV-{state['counter']:04d}"
+
+    async def b14_create_record(self, guild, record: dict) -> tuple[str, dict]:
+        state = await self.b14_get_evidence_state(guild)
+        evidence_id = self.b14_new_evidence_id(state)
+
+        record = dict(record or {})
+        record["id"] = evidence_id
+        record.setdefault("created_at", self.b14_now_iso())
+        record.setdefault("links", {})
+
+        state["records"][evidence_id] = record
+        await self.b14_set_evidence_state(guild, state)
+
+        return evidence_id, record
+
+    async def b14_find_evidence(self, guild, query: str):
+        state = await self.b14_get_evidence_state(guild)
+        records = state.get("records") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in records:
+            key = q.upper()
+            return key, records[key], state
+
+        for key, item in records.items():
+            haystack = " ".join([
+                key,
+                str(item.get("type", "")),
+                str(item.get("title", "")),
+                str(item.get("details", "")),
+                str(item.get("links", "")),
+            ]).lower()
+
+            if q and q in haystack:
+                return key, item, state
+
+        return None, None, state
+
+    def b14_record_lines(self, evidence_id: str, record: dict) -> list[str]:
+        lines = [
+            f"**{evidence_id} — {record.get('title')}**",
+            f"Type: `{record.get('type')}`",
+            f"Created: `{record.get('created_at')}`",
+            f"By: `{record.get('created_by')}`",
+            "",
+            "**Details:**",
+            record.get("details") or "No details.",
+            "",
+            "**Links:**",
+        ]
+
+        links = record.get("links") or {}
+
+        if links:
+            for key, value in links.items():
+                lines.append(f"- `{key}`: `{value}`")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    def b14_export_text(self, evidence_id: str, record: dict) -> str:
+        return "\n".join([x.replace("**", "") for x in self.b14_record_lines(evidence_id, record)])
+
+    async def b14_pack_incident_lines(self, guild, query: str) -> list[str]:
+        lines = [
+            f"**Evidence pack for incident `{query}`**",
+            "",
+        ]
+
+        if hasattr(self, "b7_find_incident"):
+            incident_id, inc, _ = await self.b7_find_incident(guild, query)
+
+            if inc:
+                lines.extend(self.b7_incident_report_lines(incident_id, inc) if hasattr(self, "b7_incident_report_lines") else [f"Incident {incident_id} found."])
+                lines.append("")
+
+                if hasattr(self, "b10_incident_evidence_lines"):
+                    lines.extend(await self.b10_incident_evidence_lines(guild, incident_id, inc))
+            else:
+                lines.append("Incident not found.")
+
+        state = await self.b14_get_evidence_state(guild)
+        records = state.get("records") or {}
+
+        linked = []
+
+        for evidence_id, record in records.items():
+            links = record.get("links") or {}
+            if str(links.get("incident", "")).lower() == str(query).lower():
+                linked.append((evidence_id, record))
+
+        lines.extend(["", "**Vault evidence linked to incident:**"])
+
+        if linked:
+            for evidence_id, record in linked:
+                lines.append(f"- `{evidence_id}` `{record.get('type')}` — {record.get('title')}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    async def b14_pack_release_lines(self, guild, query: str) -> list[str]:
+        lines = [
+            f"**Evidence pack for release `{query}`**",
+            "",
+        ]
+
+        if hasattr(self, "b13_find_release"):
+            release_id, rel, _ = await self.b13_find_release(guild, query)
+
+            if rel:
+                lines.extend((self.b13_release_report_text(release_id, rel)).splitlines())
+            else:
+                lines.append("Release not found.")
+
+        state = await self.b14_get_evidence_state(guild)
+        records = state.get("records") or {}
+
+        linked = []
+
+        for evidence_id, record in records.items():
+            links = record.get("links") or {}
+            if str(links.get("release", "")).lower() == str(query).lower():
+                linked.append((evidence_id, record))
+
+        lines.extend(["", "**Vault evidence linked to release:**"])
+
+        if linked:
+            for evidence_id, record in linked:
+                lines.append(f"- `{evidence_id}` `{record.get('type')}` — {record.get('title')}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    @mcore.group(name="evidence", invoke_without_command=True)
+    async def evidence(self, ctx):
+        """Evidence vault and compliance trail."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Evidence Vault / Compliance Trail**",
+            "",
+            "`!mcore evidence add <type> <title> | <details>` — add evidence",
+            "`!mcore evidence list` — list evidence",
+            "`!mcore evidence show <id/query>` — show evidence",
+            "`!mcore evidence link-incident <evidence> <incident>` — link to incident",
+            "`!mcore evidence link-release <evidence> <release>` — link to release",
+            "`!mcore evidence pack incident <id/query>` — incident evidence pack",
+            "`!mcore evidence pack release <id/query>` — release evidence pack",
+            "`!mcore evidence audit` — evidence audit summary",
+            "`!mcore evidence export <id/query>` — export one evidence record",
+        ]
+
+        await self.send_paginated(ctx, "Evidence Vault", lines)
+
+    @evidence.command(name="add")
+    async def evidence_add(self, ctx, evidence_type: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            title, details = [x.strip() for x in text.split("|", 1)]
+        else:
+            title = text.strip()
+            details = ""
+
+        evidence_id, record = await self.b14_create_record(ctx.guild, {
+            "type": self.b11_safe(evidence_type, 80) if hasattr(self, "b11_safe") else str(evidence_type)[:80],
+            "title": self.b11_safe(title, 240) if hasattr(self, "b11_safe") else str(title)[:240],
+            "details": self.b11_safe(details, 2000) if hasattr(self, "b11_safe") else str(details)[:2000],
+            "created_by": str(ctx.author),
+            "created_by_id": getattr(ctx.author, "id", None),
+            "links": {},
+        })
+
+        await ctx.send(embed=ok_embed("Evidence added", f"`{evidence_id}` — {record.get('title')}"))
+
+    @evidence.command(name="list")
+    async def evidence_list(self, ctx, mode: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b14_get_evidence_state(ctx.guild)
+        records = state.get("records") or {}
+
+        if not records:
+            await ctx.send(embed=info_embed("Evidence Vault", "No evidence records yet."))
+            return
+
+        lines = []
+
+        for evidence_id, record in sorted(records.items(), reverse=True):
+            if mode != "all" and str(record.get("type", "")).lower() != mode.lower():
+                continue
+
+            lines.append(f"`{evidence_id}` — `{record.get('type')}` — {record.get('title')}")
+
+        await self.send_paginated(ctx, "Evidence Records", lines or [f"No evidence records matched `{mode}`."])
+
+    @evidence.command(name="show")
+    async def evidence_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        evidence_id, record, _ = await self.b14_find_evidence(ctx.guild, query)
+
+        if not record:
+            await ctx.send(embed=info_embed("Evidence not found", f"No evidence matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Evidence Record", self.b14_record_lines(evidence_id, record))
+
+    @evidence.command(name="link-incident")
+    async def evidence_link_incident(self, ctx, evidence_query: str, incident_query: str):
+        if not await require_admin(ctx):
+            return
+
+        evidence_id, record, state = await self.b14_find_evidence(ctx.guild, evidence_query)
+
+        if not record:
+            await ctx.send(embed=info_embed("Evidence not found", f"No evidence matched `{evidence_query}`."))
+            return
+
+        incident_id = incident_query
+
+        if hasattr(self, "b7_find_incident"):
+            found_id, inc, _ = await self.b7_find_incident(ctx.guild, incident_query)
+            if inc:
+                incident_id = found_id
+
+        links = record.get("links") or {}
+        links["incident"] = incident_id
+        record["links"] = links
+        record["updated_at"] = self.b14_now_iso()
+        record["updated_by"] = str(ctx.author)
+
+        state["records"][evidence_id] = record
+        await self.b14_set_evidence_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Evidence linked", f"`{evidence_id}` linked to incident `{incident_id}`."))
+
+    @evidence.command(name="link-release")
+    async def evidence_link_release(self, ctx, evidence_query: str, release_query: str):
+        if not await require_admin(ctx):
+            return
+
+        evidence_id, record, state = await self.b14_find_evidence(ctx.guild, evidence_query)
+
+        if not record:
+            await ctx.send(embed=info_embed("Evidence not found", f"No evidence matched `{evidence_query}`."))
+            return
+
+        release_id = release_query
+
+        if hasattr(self, "b13_find_release"):
+            found_id, rel, _ = await self.b13_find_release(ctx.guild, release_query)
+            if rel:
+                release_id = found_id
+
+        links = record.get("links") or {}
+        links["release"] = release_id
+        record["links"] = links
+        record["updated_at"] = self.b14_now_iso()
+        record["updated_by"] = str(ctx.author)
+
+        state["records"][evidence_id] = record
+        await self.b14_set_evidence_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Evidence linked", f"`{evidence_id}` linked to release `{release_id}`."))
+
+    @evidence.command(name="pack")
+    async def evidence_pack(self, ctx, target_type: str, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        target_type = str(target_type or "").lower().strip()
+
+        if target_type in ["incident", "inc"]:
+            lines = await self.b14_pack_incident_lines(ctx.guild, query)
+            await self.send_paginated(ctx, "Incident Evidence Pack", lines)
+            return
+
+        if target_type in ["release", "rel"]:
+            lines = await self.b14_pack_release_lines(ctx.guild, query)
+            await self.send_paginated(ctx, "Release Evidence Pack", lines)
+            return
+
+        await ctx.send(embed=info_embed("Unknown evidence pack type", "Use `incident` or `release`."))
+
+    @evidence.command(name="audit")
+    async def evidence_audit(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b14_get_evidence_state(ctx.guild)
+        records = state.get("records") or {}
+
+        by_type = {}
+        incident_links = 0
+        release_links = 0
+
+        for _, record in records.items():
+            typ = record.get("type") or "unknown"
+            by_type[typ] = by_type.get(typ, 0) + 1
+
+            links = record.get("links") or {}
+
+            if links.get("incident"):
+                incident_links += 1
+
+            if links.get("release"):
+                release_links += 1
+
+        lines = [
+            f"Evidence records: `{len(records)}`",
+            f"Linked to incidents: `{incident_links}`",
+            f"Linked to releases: `{release_links}`",
+            "",
+            "**By type:**",
+        ]
+
+        if by_type:
+            for typ, count in sorted(by_type.items(), key=lambda x: x[1], reverse=True):
+                lines.append(f"- `{typ}` — `{count}`")
+        else:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "Evidence Audit", lines)
+
+    @evidence.command(name="export")
+    async def evidence_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        evidence_id, record, _ = await self.b14_find_evidence(ctx.guild, query)
+
+        if not record:
+            await ctx.send(embed=info_embed("Evidence not found", f"No evidence matched `{query}`."))
+            return
+
+        report = self.b14_export_text(evidence_id, record)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Evidence exported", f"Exported `{evidence_id}`."),
+            file=discord.File(fp, filename=f"mattis-evidence-{evidence_id.lower()}.txt")
+        )
+
     @mcore.group(name="ops", invoke_without_command=True)
     async def ops(self, ctx):
         """Unified Mattis operations command centre."""
