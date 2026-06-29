@@ -5104,6 +5104,123 @@ class MattisCore(commands.Cog):
 
             await self.run_log_checks(guild, dry_run=False, force=False)
 
+
+    def b4b_event_search_text(self, event: dict) -> str:
+        c = self.b4a_classify_log_event(event)
+        return " ".join([
+            str(c.get("id", "")),
+            str(c.get("actor", "")),
+            str(c.get("action", "")),
+            str(c.get("reason", "")),
+            str(c.get("risk", "")),
+            str(c.get("category", "")),
+            str(c.get("createdAt", "")),
+        ]).lower()
+
+    def b4b_match_event(self, event: dict, query: str) -> bool:
+        query = str(query or "").lower().strip()
+        if not query:
+            return True
+
+        text = self.b4b_event_search_text(event)
+
+        # All words must match somewhere.
+        parts = [x for x in query.replace(",", " ").split() if x]
+
+        if not parts:
+            return True
+
+        return all(part in text for part in parts)
+
+    def b4b_find_events(self, events: list[dict], query: str, limit: int = 25) -> list[dict]:
+        matches = []
+
+        for event in events:
+            if self.b4b_match_event(event, query):
+                matches.append(event)
+
+            if len(matches) >= limit:
+                break
+
+        return matches
+
+    def b4b_find_single_event(self, events: list[dict], query: str):
+        query_l = str(query or "").lower().strip()
+
+        if not query_l:
+            return None
+
+        # Exact/prefix ID first.
+        for event in events:
+            event_id = str(event.get("id") or "").lower()
+            if event_id and (event_id == query_l or event_id.startswith(query_l) or query_l in event_id):
+                return event
+
+        # Then broad match.
+        matches = self.b4b_find_events(events, query_l, limit=1)
+        return matches[0] if matches else None
+
+    def b4b_event_explanation_lines(self, event: dict) -> list[str]:
+        c = self.b4a_classify_log_event(event)
+
+        why = "This event should be reviewed because it appeared in the high-risk audit feed."
+
+        reason_l = str(c.get("reason", "")).lower()
+        action_l = str(c.get("action", "")).lower()
+
+        if any(x in reason_l for x in ["secret", "token", "key", "webhook"]):
+            why = "This is high risk because it relates to secrets, tokens, keys, or webhook configuration. These can affect authentication, billing, Roblox integrations, or API trust."
+
+        elif "stripe" in reason_l or "billing" in reason_l:
+            why = "This is important because billing/Stripe settings can affect payments, subscriptions, invoice handling, and customer access."
+
+        elif "roblox" in reason_l:
+            why = "This is important because Roblox integration settings can affect verification, webhooks, customer products, and CMS automation."
+
+        elif any(x in reason_l for x in ["role", "permission", "access", "capability"]):
+            why = "This is important because access/permission changes can affect who can manage, view, or control sensitive systems."
+
+        elif "setting.updated" in action_l:
+            why = "This is important because platform setting updates can change production behaviour and should be attributable to an expected admin action."
+
+        next_steps = [
+            "Confirm the actor is expected and authorised.",
+            "Confirm the change matches planned work.",
+            "Check whether any secret/token/key value was rotated or exposed.",
+            "Check whether customer-facing systems were affected.",
+            "If unexpected, escalate through the alert escalation path.",
+        ]
+
+        lines = [
+            f"ID: `{c['id'] or 'Unknown'}`",
+            f"Time: `{c['createdAt']}`",
+            f"Actor: `{c['actor']}`",
+            f"Action: `{c['action']}`",
+            f"Risk: `{c['risk']}`",
+            f"Category: `{c['category']}`",
+            f"Reason: {c['reason']}",
+            "",
+            "**Why this matters:**",
+            why,
+            "",
+            "**Recommended checks:**",
+        ]
+
+        for step in next_steps:
+            lines.append(f"- {step}")
+
+        lines.extend([
+            "",
+            "**Useful commands:**",
+            "`!mcore logs event <event_id>`",
+            "`!mcore logs actor <actor_id>`",
+            "`!mcore logs reasons`",
+            "`!mcore alerts investigate audit`",
+            "`!mcore alerts escalate audit <note>`",
+        ])
+
+        return lines
+
     @mcore.group(name="logs", invoke_without_command=True)
 
     async def logs(self, ctx):
@@ -5134,6 +5251,155 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Mattis Logs", lines)
 
+
+
+    @logs.command(name="find")
+    async def logs_find(self, ctx, *, query: str):
+        """Search high-risk audit logs by keyword."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+        matches = self.b4b_find_events(events, query, limit=20)
+
+        if not matches:
+            await ctx.send(embed=info_embed("Log Search", f"No high-risk audit events matched `{query}`."))
+            return
+
+        lines = [
+            f"Query: `{query}`",
+            f"Matches: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_event_lines(matches, limit=20))
+        await self.send_paginated(ctx, "Log Search Results", lines)
+
+    @logs.command(name="actor")
+    async def logs_actor(self, ctx, *, actor: str):
+        """Show high-risk logs for one actor/user ID."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        matches = []
+
+        actor_l = actor.lower().strip()
+
+        for event in events:
+            event_actor = self.b4a_log_event_actor(event).lower()
+            if actor_l in event_actor:
+                matches.append(event)
+
+        if not matches:
+            await ctx.send(embed=info_embed("Actor Logs", f"No high-risk audit events found for `{actor}`."))
+            return
+
+        lines = [
+            f"Actor query: `{actor}`",
+            f"Matching events: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_event_lines(matches, limit=20))
+        await self.send_paginated(ctx, "Actor Audit Logs", lines)
+
+    @logs.command(name="action")
+    async def logs_action(self, ctx, *, action: str):
+        """Show high-risk logs matching an action."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        action_l = action.lower().strip()
+        matches = [
+            event for event in events
+            if action_l in self.b4a_log_event_action(event).lower()
+        ]
+
+        if not matches:
+            await ctx.send(embed=info_embed("Action Logs", f"No high-risk audit events found for action `{action}`."))
+            return
+
+        lines = [
+            f"Action query: `{action}`",
+            f"Matching events: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_event_lines(matches, limit=20))
+        await self.send_paginated(ctx, "Action Audit Logs", lines)
+
+    @logs.command(name="risk")
+    async def logs_risk(self, ctx, risk: str = "high"):
+        """Show high-risk logs by risk level."""
+        if not await require_admin(ctx):
+            return
+
+        risk = str(risk or "high").lower().strip()
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        matches = [
+            event for event in events
+            if self.b4a_log_event_risk(event).lower() == risk
+            or self.b4a_classify_log_event(event).get("severity") == risk
+        ]
+
+        if not matches:
+            await ctx.send(embed=info_embed("Risk Logs", f"No audit events found for risk `{risk}`."))
+            return
+
+        lines = [
+            f"Risk: `{risk}`",
+            f"Matching events: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_event_lines(matches, limit=20))
+        await self.send_paginated(ctx, "Risk Audit Logs", lines)
+
+    @logs.command(name="event")
+    async def logs_event(self, ctx, *, event_id: str):
+        """Show one high-risk audit event by ID or search query."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        event = self.b4b_find_single_event(events, event_id)
+
+        if not event:
+            await ctx.send(embed=info_embed("Audit Event", f"No event matched `{event_id}`."))
+            return
+
+        lines = self.b4a_event_lines([event], limit=1)
+        await self.send_paginated(ctx, "Audit Event Detail", lines)
+
+    @logs.command(name="explain")
+    async def logs_explain(self, ctx, *, query: str):
+        """Explain one high-risk audit event by ID or search query."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        event = self.b4b_find_single_event(events, query)
+
+        if not event:
+            await ctx.send(embed=info_embed("Explain Log Event", f"No event matched `{query}`."))
+            return
+
+        lines = self.b4b_event_explanation_lines(event)
+        await self.send_paginated(ctx, "Audit Event Explanation", lines)
 
     @logs.command(name="highrisk")
     async def logs_highrisk(self, ctx):
