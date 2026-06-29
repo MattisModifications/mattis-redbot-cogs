@@ -436,6 +436,839 @@ class MattisCore(commands.Cog):
 
         await ctx.send(embed=e)
 
+
+    def b5_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    async def b5_get_api_config(self, guild):
+        api_url = "https://api.mattisproductions.com"
+        api_token = None
+
+        if hasattr(self, "doctor_get_api_config_value"):
+            try:
+                found_url = await self.doctor_get_api_config_value(guild, [
+                    "api_url",
+                    "api_base_url",
+                    "mattis_api_url",
+                    "backend_url",
+                ])
+
+                found_token = await self.doctor_get_api_config_value(guild, [
+                    "api_token",
+                    "doctor_api_token",
+                    "bot_api_token",
+                    "mattis_api_token",
+                    "mattis_token",
+                    "api_key",
+                ])
+
+                if found_url:
+                    api_url = str(found_url)
+
+                if found_token:
+                    api_token = str(found_token)
+            except Exception:
+                pass
+
+        return api_url.rstrip("/"), api_token
+
+    async def b5_http_get(self, guild, endpoint: str, timeout_seconds: int = 10) -> dict:
+        import aiohttp
+        import time
+
+        api_url, api_token = await self.b5_get_api_config(guild)
+
+        endpoint = endpoint if endpoint.startswith("/") else "/" + endpoint
+        url = api_url + endpoint
+
+        headers = {}
+
+        if api_token:
+            token = str(api_token).strip()
+            headers["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+
+        started = time.perf_counter()
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers) as resp:
+                    text = await resp.text()
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+                    try:
+                        payload = await resp.json(content_type=None)
+                    except Exception:
+                        payload = None
+
+                    return {
+                        "ok": 200 <= resp.status < 300,
+                        "status": resp.status,
+                        "endpoint": endpoint,
+                        "url": url,
+                        "elapsed_ms": elapsed_ms,
+                        "payload": payload,
+                        "text_preview": str(text or "")[:300],
+                        "error": "",
+                    }
+
+        except Exception as e:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+            return {
+                "ok": False,
+                "status": 0,
+                "endpoint": endpoint,
+                "url": url,
+                "elapsed_ms": elapsed_ms,
+                "payload": None,
+                "text_preview": "",
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    def b5_core_endpoints(self) -> list[str]:
+        return [
+            "/bot/support/critical",
+            "/bot/support/unassigned",
+            "/bot/billing/failed",
+            "/bot/billing/pastdue",
+            "/bot/audit/highrisk",
+            "/bot/security/risks",
+            "/bot/security/suspicious",
+            "/bot/automation/failed",
+            "/bot/discord/broken",
+            "/bot/roblox/broken",
+            "/bot/incidents",
+        ]
+
+    def b5_optional_endpoints(self) -> list[str]:
+        return [
+            "/health",
+            "/api/health",
+            "/bot/status",
+            "/bot/backups/status",
+            "/bot/backup/status",
+        ]
+
+    async def b5_check_endpoints(self, guild, include_optional: bool = False) -> list[dict]:
+        endpoints = self.b5_core_endpoints()
+
+        if include_optional:
+            endpoints = endpoints + self.b5_optional_endpoints()
+
+        results = []
+
+        for endpoint in endpoints:
+            results.append(await self.b5_http_get(guild, endpoint, timeout_seconds=10))
+
+        return results
+
+    async def b5_get_prod_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("production_state") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("release_freeze", False)
+        state.setdefault("release_freeze_reason", "")
+        state.setdefault("release_freeze_by", "")
+        state.setdefault("release_freeze_at", "")
+        state.setdefault("snapshots", [])
+
+        return state
+
+    async def b5_set_prod_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["production_state"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b5_endpoint_summary(self, checks: list[dict]) -> dict:
+        total = len(checks)
+        ok = sum(1 for x in checks if x.get("ok"))
+        failed = total - ok
+
+        slow = [x for x in checks if int(x.get("elapsed_ms", 0) or 0) >= 2500]
+
+        return {
+            "total": total,
+            "ok": ok,
+            "failed": failed,
+            "slow": len(slow),
+            "healthy": failed == 0,
+        }
+
+    def b5_score_readiness(self, checks: list[dict], security: dict, prod_state: dict) -> dict:
+        summary = self.b5_endpoint_summary(checks)
+
+        score = 100
+        blockers = []
+        warnings = []
+
+        if summary["failed"]:
+            score -= min(60, summary["failed"] * 12)
+            blockers.append(f"{summary['failed']} core API endpoint(s) failed.")
+
+        if summary["slow"]:
+            score -= min(20, summary["slow"] * 5)
+            warnings.append(f"{summary['slow']} endpoint(s) responded slowly.")
+
+        highrisk_count = int(security.get("highrisk_events", 0) or 0)
+        secret_events = int(security.get("secret_events", 0) or 0)
+
+        if highrisk_count >= 20:
+            score -= 10
+            warnings.append(f"{highrisk_count} high-risk audit event(s) currently returned by the API.")
+
+        if secret_events:
+            score -= 10
+            warnings.append(f"{secret_events} secret/token/webhook related audit event(s) should be reviewed.")
+
+        if prod_state.get("release_freeze"):
+            score -= 25
+            blockers.append("Release freeze is currently enabled.")
+
+        if score >= 90 and not blockers:
+            label = "Production ready"
+        elif score >= 75 and not blockers:
+            label = "Mostly ready"
+        elif score >= 55:
+            label = "Needs review"
+        else:
+            label = "Not ready"
+
+        return {
+            "score": max(0, score),
+            "label": label,
+            "blockers": blockers,
+            "warnings": warnings,
+        }
+
+    async def b5_security_summary(self, guild) -> dict:
+        result = {
+            "highrisk_events": 0,
+            "secret_events": 0,
+            "actors": [],
+            "categories": [],
+            "top_reasons": [],
+        }
+
+        try:
+            if not hasattr(self, "b4a_fetch_highrisk_events"):
+                return result
+
+            data = await self.b4a_fetch_highrisk_events(guild)
+            events = data.get("events") or []
+
+            result["highrisk_events"] = len(events)
+
+            classified = [self.b4a_classify_log_event(e) for e in events]
+
+            secret_events = []
+
+            for item in classified:
+                reason = str(item.get("reason", "")).lower()
+                category = str(item.get("category", "")).lower()
+
+                if any(x in reason or x in category for x in ["secret", "token", "key", "webhook"]):
+                    secret_events.append(item)
+
+            result["secret_events"] = len(secret_events)
+
+            def group(field):
+                counts = {}
+                for item in classified:
+                    key = str(item.get(field) or "Unknown")
+                    counts[key] = counts.get(key, 0) + 1
+                return sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+            result["actors"] = group("actor")[:5]
+            result["categories"] = group("category")[:8]
+            result["top_reasons"] = group("reason")[:8]
+
+        except Exception:
+            pass
+
+        return result
+
+    async def b5_build_readiness(self, guild, include_optional: bool = False) -> dict:
+        checks = await self.b5_check_endpoints(guild, include_optional=include_optional)
+        security = await self.b5_security_summary(guild)
+        prod_state = await self.b5_get_prod_state(guild)
+        readiness = self.b5_score_readiness(checks, security, prod_state)
+
+        return {
+            "created_at": self.b5_now_iso(),
+            "checks": checks,
+            "security": security,
+            "prod_state": prod_state,
+            "readiness": readiness,
+        }
+
+    def b5_check_lines(self, checks: list[dict]) -> list[str]:
+        lines = []
+
+        for check in checks:
+            emoji = "✅" if check.get("ok") else "❌"
+            status = check.get("status") or 0
+            elapsed = check.get("elapsed_ms") or 0
+            endpoint = check.get("endpoint")
+
+            if check.get("ok"):
+                lines.append(f"{emoji} `{endpoint}` — HTTP `{status}` — `{elapsed}ms`")
+            else:
+                error = check.get("error") or check.get("text_preview") or "failed"
+                lines.append(f"{emoji} `{endpoint}` — HTTP `{status}` — `{elapsed}ms` — {error[:180]}")
+
+        return lines
+
+    def b5_readiness_lines(self, data: dict) -> list[str]:
+        readiness = data.get("readiness") or {}
+        summary = self.b5_endpoint_summary(data.get("checks") or {})
+        security = data.get("security") or {}
+        prod_state = data.get("prod_state") or {}
+
+        lines = [
+            f"Generated: `{data.get('created_at')}`",
+            f"Readiness: `{readiness.get('label')}`",
+            f"Score: `{readiness.get('score')}/100`",
+            "",
+            "**API endpoints:**",
+            f"Total: `{summary['total']}`",
+            f"Healthy: `{summary['ok']}`",
+            f"Failed: `{summary['failed']}`",
+            f"Slow: `{summary['slow']}`",
+            "",
+            "**Release safety:**",
+            f"Release freeze: `{'on' if prod_state.get('release_freeze') else 'off'}`",
+        ]
+
+        if prod_state.get("release_freeze_reason"):
+            lines.append(f"Freeze reason: {prod_state.get('release_freeze_reason')}")
+
+        lines.extend([
+            "",
+            "**Security/audit feed:**",
+            f"High-risk events: `{security.get('highrisk_events', 0)}`",
+            f"Secret/token/webhook events: `{security.get('secret_events', 0)}`",
+            "",
+        ])
+
+        blockers = readiness.get("blockers") or []
+        warnings = readiness.get("warnings") or []
+
+        lines.append("**Blockers:**")
+        if blockers:
+            for blocker in blockers:
+                lines.append(f"- 🚫 {blocker}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Warnings:**"])
+        if warnings:
+            for warning in warnings:
+                lines.append(f"- ⚠️ {warning}")
+        else:
+            lines.append("- None")
+
+        lines.extend([
+            "",
+            "**Core endpoint results:**",
+        ])
+
+        lines.extend(self.b5_check_lines(data.get("checks") or []))
+
+        return lines
+
+    async def b5_store_snapshot(self, guild, data: dict):
+        state = await self.b5_get_prod_state(guild)
+        snapshots = state.get("snapshots") or []
+
+        compact = {
+            "created_at": data.get("created_at"),
+            "score": data.get("readiness", {}).get("score"),
+            "label": data.get("readiness", {}).get("label"),
+            "failed": self.b5_endpoint_summary(data.get("checks") or []).get("failed"),
+            "highrisk_events": data.get("security", {}).get("highrisk_events"),
+            "secret_events": data.get("security", {}).get("secret_events"),
+            "release_freeze": data.get("prod_state", {}).get("release_freeze"),
+        }
+
+        snapshots.append(compact)
+        state["snapshots"] = snapshots[-25:]
+
+        await self.b5_set_prod_state(guild, state)
+
+    def b5_report_text(self, data: dict) -> str:
+        lines = [
+            "Mattis CMS | Systems",
+            "Production Readiness Report",
+            "=" * 40,
+            "",
+        ]
+
+        lines.extend([x.replace("**", "") for x in self.b5_readiness_lines(data)])
+
+        lines.extend([
+            "",
+            "Recommended Actions",
+            "-" * 40,
+        ])
+
+        readiness = data.get("readiness") or {}
+        blockers = readiness.get("blockers") or []
+        warnings = readiness.get("warnings") or []
+
+        if blockers:
+            for item in blockers:
+                lines.append(f"- Resolve blocker: {item}")
+
+        if warnings:
+            for item in warnings:
+                lines.append(f"- Review warning: {item}")
+
+        if not blockers and not warnings:
+            lines.append("- No immediate readiness blockers detected.")
+
+        lines.extend([
+            "- Run `!mcore doctor` and review any failures.",
+            "- Run `!mcore alerts ops` and confirm no unresolved critical alerts.",
+            "- Run `!mcore logs executive` and confirm high-risk audit events are expected.",
+            "- Confirm backups are working outside Discord on the VPS/DB layer.",
+        ])
+
+        return "\n".join(lines)
+
+    @mcore.group(name="prod", invoke_without_command=True)
+    async def prod(self, ctx):
+        """Production readiness and service health control centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Mattis Production Control Centre**",
+            "",
+            "`!mcore prod health` — quick production health check",
+            "`!mcore prod api` — API/base configuration and basic reachability",
+            "`!mcore prod endpoints` — check all core API bot endpoints",
+            "`!mcore prod readiness` — readiness score and blockers",
+            "`!mcore prod preflight <release>` — release preflight gate",
+            "`!mcore prod freeze on/off/status <reason>` — release freeze control",
+            "`!mcore prod backup` — backup readiness/status intelligence",
+            "`!mcore prod security` — security/audit readiness summary",
+            "`!mcore prod risks` — production risks list",
+            "`!mcore prod checklist` — production checklist",
+            "`!mcore prod snapshot` — save readiness snapshot",
+            "`!mcore prod snapshots` — list saved snapshots",
+            "`!mcore prod report` — full report in Discord",
+            "`!mcore prod export` — export report as .txt",
+        ]
+
+        await self.send_paginated(ctx, "Production Control", lines)
+
+    @prod.command(name="api")
+    async def prod_api(self, ctx):
+        """Show API configuration and basic reachability."""
+        if not await require_admin(ctx):
+            return
+
+        api_url, api_token = await self.b5_get_api_config(ctx.guild)
+        check = await self.b5_http_get(ctx.guild, "/bot/audit/highrisk")
+
+        lines = [
+            f"API URL: `{api_url}`",
+            f"API token configured: `{'yes' if api_token else 'no'}`",
+            "",
+            "**Reachability:**",
+        ]
+
+        lines.extend(self.b5_check_lines([check]))
+
+        await self.send_paginated(ctx, "Production API", lines)
+
+    @prod.command(name="health")
+    async def prod_health(self, ctx):
+        """Run a quick production health check."""
+        if not await require_admin(ctx):
+            return
+
+        checks = []
+
+        for endpoint in ["/bot/audit/highrisk", "/bot/support/critical", "/bot/billing/failed", "/bot/incidents"]:
+            checks.append(await self.b5_http_get(ctx.guild, endpoint))
+
+        summary = self.b5_endpoint_summary(checks)
+
+        lines = [
+            f"Healthy: `{summary['healthy']}`",
+            f"Checked: `{summary['total']}`",
+            f"OK: `{summary['ok']}`",
+            f"Failed: `{summary['failed']}`",
+            f"Slow: `{summary['slow']}`",
+            "",
+        ]
+
+        lines.extend(self.b5_check_lines(checks))
+
+        await self.send_paginated(ctx, "Production Health", lines)
+
+    @prod.command(name="endpoints")
+    async def prod_endpoints(self, ctx, optional: str = ""):
+        """Check all core production API bot endpoints."""
+        if not await require_admin(ctx):
+            return
+
+        include_optional = str(optional or "").lower() in ["optional", "all", "full", "yes", "true"]
+        checks = await self.b5_check_endpoints(ctx.guild, include_optional=include_optional)
+        summary = self.b5_endpoint_summary(checks)
+
+        lines = [
+            f"Core + optional: `{include_optional}`",
+            f"Checked: `{summary['total']}`",
+            f"OK: `{summary['ok']}`",
+            f"Failed: `{summary['failed']}`",
+            f"Slow: `{summary['slow']}`",
+            "",
+        ]
+
+        lines.extend(self.b5_check_lines(checks))
+
+        await self.send_paginated(ctx, "Production Endpoints", lines)
+
+    @prod.command(name="readiness")
+    async def prod_readiness(self, ctx):
+        """Show production readiness score."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        lines = self.b5_readiness_lines(data)
+
+        await self.send_paginated(ctx, "Production Readiness", lines)
+
+    @prod.command(name="preflight")
+    async def prod_preflight(self, ctx, *, release_name: str = "unnamed release"):
+        """Run release preflight gate."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        readiness = data.get("readiness") or {}
+        score = int(readiness.get("score", 0) or 0)
+        blockers = readiness.get("blockers") or []
+
+        allowed = score >= 75 and not blockers
+
+        lines = [
+            f"Release: `{release_name}`",
+            f"Preflight result: `{'PASS' if allowed else 'BLOCKED'}`",
+            f"Readiness: `{readiness.get('label')}`",
+            f"Score: `{score}/100`",
+            "",
+        ]
+
+        if allowed:
+            lines.extend([
+                "✅ Release can proceed based on current bot/API checks.",
+                "",
+                "**Before deploying:**",
+                "- Confirm Git status is clean.",
+                "- Confirm database backup exists.",
+                "- Confirm rollback plan is known.",
+                "- Confirm no critical alerts are unresolved.",
+            ])
+        else:
+            lines.append("🚫 Release should not proceed until blockers/warnings are reviewed.")
+
+        lines.extend(["", "**Readiness details:**"])
+        lines.extend(self.b5_readiness_lines(data))
+
+        await self.send_paginated(ctx, "Release Preflight", lines)
+
+    @prod.command(name="freeze")
+    async def prod_freeze(self, ctx, mode: str = "status", *, reason: str = ""):
+        """Control release freeze state."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b5_get_prod_state(ctx.guild)
+        mode = str(mode or "status").lower().strip()
+
+        if mode in ["on", "enable", "enabled", "true"]:
+            state["release_freeze"] = True
+            state["release_freeze_reason"] = reason or "No reason provided."
+            state["release_freeze_by"] = str(ctx.author)
+            state["release_freeze_at"] = self.b5_now_iso()
+            await self.b5_set_prod_state(ctx.guild, state)
+            await ctx.send(embed=ok_embed("Release freeze enabled", f"Reason: {state['release_freeze_reason']}"))
+            return
+
+        if mode in ["off", "disable", "disabled", "false"]:
+            old_reason = state.get("release_freeze_reason") or "No previous reason."
+            state["release_freeze"] = False
+            state["release_freeze_reason"] = reason or ""
+            state["release_freeze_by"] = str(ctx.author)
+            state["release_freeze_at"] = self.b5_now_iso()
+            await self.b5_set_prod_state(ctx.guild, state)
+            await ctx.send(embed=ok_embed("Release freeze disabled", f"Previous reason: {old_reason}"))
+            return
+
+        lines = [
+            f"Release freeze: `{'on' if state.get('release_freeze') else 'off'}`",
+            f"Reason: {state.get('release_freeze_reason') or 'None'}",
+            f"Changed by: `{state.get('release_freeze_by') or 'Unknown'}`",
+            f"Changed at: `{state.get('release_freeze_at') or 'Unknown'}`",
+            "",
+            "`!mcore prod freeze on <reason>`",
+            "`!mcore prod freeze off <reason>`",
+        ]
+
+        await self.send_paginated(ctx, "Release Freeze", lines)
+
+    @prod.command(name="backup")
+    async def prod_backup(self, ctx):
+        """Check backup readiness/status intelligence."""
+        if not await require_admin(ctx):
+            return
+
+        backup_endpoints = [
+            "/bot/backups/status",
+            "/bot/backup/status",
+            "/backups/status",
+            "/health/backups",
+        ]
+
+        checks = []
+
+        for endpoint in backup_endpoints:
+            checks.append(await self.b5_http_get(ctx.guild, endpoint, timeout_seconds=8))
+
+        found = [x for x in checks if x.get("ok")]
+
+        lines = [
+            "**Backup readiness**",
+            "",
+            "Discord bot can only verify backup status if the API exposes a backup endpoint.",
+            "",
+        ]
+
+        if found:
+            lines.append("✅ Backup status endpoint found.")
+        else:
+            lines.append("⚠️ No backup status endpoint responded with HTTP 2xx.")
+
+        lines.extend([
+            "",
+            "**Endpoint checks:**",
+        ])
+
+        lines.extend(self.b5_check_lines(checks))
+
+        lines.extend([
+            "",
+            "**Manual VPS/DB checks still required:**",
+            "- Confirm Postgres backup job exists.",
+            "- Confirm latest backup file exists.",
+            "- Confirm backup restore has been tested.",
+            "- Confirm backups are not stored only on the same server.",
+            "- Confirm secrets/env files are backed up securely or reproducible.",
+        ])
+
+        await self.send_paginated(ctx, "Backup Readiness", lines)
+
+    @prod.command(name="security")
+    async def prod_security(self, ctx):
+        """Show production security/audit readiness."""
+        if not await require_admin(ctx):
+            return
+
+        security = await self.b5_security_summary(ctx.guild)
+
+        lines = [
+            f"High-risk audit events: `{security.get('highrisk_events', 0)}`",
+            f"Secret/token/webhook events: `{security.get('secret_events', 0)}`",
+            "",
+            "**Top actors:**",
+        ]
+
+        for actor, count in security.get("actors", []):
+            lines.append(f"- `{actor}` — `{count}`")
+
+        lines.extend(["", "**Categories:**"])
+
+        for category, count in security.get("categories", []):
+            lines.append(f"- `{category}` — `{count}`")
+
+        lines.extend(["", "**Top reasons:**"])
+
+        for reason, count in security.get("top_reasons", []):
+            lines.append(f"- {reason} — `{count}`")
+
+        lines.extend([
+            "",
+            "**Useful commands:**",
+            "`!mcore logs executive`",
+            "`!mcore logs suspicious`",
+            "`!mcore logs packet stripe`",
+            "`!mcore alerts ops`",
+            "`!mcore alerts investigate audit`",
+        ])
+
+        await self.send_paginated(ctx, "Production Security", lines)
+
+    @prod.command(name="risks")
+    async def prod_risks(self, ctx):
+        """Show current production risks."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        readiness = data.get("readiness") or {}
+        security = data.get("security") or {}
+
+        lines = [
+            f"Readiness: `{readiness.get('label')}`",
+            f"Score: `{readiness.get('score')}/100`",
+            "",
+            "**Blockers:**",
+        ]
+
+        blockers = readiness.get("blockers") or []
+        warnings = readiness.get("warnings") or []
+
+        if blockers:
+            for item in blockers:
+                lines.append(f"- 🚫 {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Warnings:**"])
+
+        if warnings:
+            for item in warnings:
+                lines.append(f"- ⚠️ {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend([
+            "",
+            "**Operational risk notes:**",
+            f"- High-risk audit events: `{security.get('highrisk_events', 0)}`",
+            f"- Secret/token/webhook events: `{security.get('secret_events', 0)}`",
+            "- Confirm database backup and rollback manually.",
+            "- Confirm Discord bot host and VPS/API host are both expected.",
+        ])
+
+        await self.send_paginated(ctx, "Production Risks", lines)
+
+    @prod.command(name="checklist")
+    async def prod_checklist(self, ctx):
+        """Show production readiness checklist."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Production readiness checklist**",
+            "",
+            "1. ☐ `!mcore prod readiness` score is acceptable.",
+            "2. ☐ `!mcore prod endpoints` has no failed core API endpoints.",
+            "3. ☐ `!mcore doctor` has no serious failures.",
+            "4. ☐ `!mcore alerts ops` has no unresolved critical/high alerts that block release.",
+            "5. ☐ `!mcore logs executive` high-risk events are expected and documented.",
+            "6. ☐ Database backup exists and restore has been tested.",
+            "7. ☐ `.env` secrets are correct and not pasted into Discord/GitHub.",
+            "8. ☐ Stripe webhook signing has been checked after billing secret changes.",
+            "9. ☐ Roblox OAuth/Open Cloud/webhook flows have been tested.",
+            "10. ☐ Discord OAuth and bot command health have been tested.",
+            "11. ☐ Rollback steps are known.",
+            "12. ☐ Release freeze is off unless intentionally blocking.",
+            "",
+            "**Useful command flow:**",
+            "`!mcore prod preflight release-name`",
+            "`!mcore prod snapshot`",
+            "`!mcore prod export`",
+        ]
+
+        await self.send_paginated(ctx, "Production Checklist", lines)
+
+    @prod.command(name="snapshot")
+    async def prod_snapshot(self, ctx):
+        """Save a production readiness snapshot."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        await self.b5_store_snapshot(ctx.guild, data)
+
+        readiness = data.get("readiness") or {}
+
+        await ctx.send(embed=ok_embed(
+            "Production snapshot saved",
+            f"Readiness: `{readiness.get('label')}`\nScore: `{readiness.get('score')}/100`"
+        ))
+
+    @prod.command(name="snapshots")
+    async def prod_snapshots(self, ctx):
+        """List saved production readiness snapshots."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b5_get_prod_state(ctx.guild)
+        snapshots = state.get("snapshots") or []
+
+        if not snapshots:
+            await ctx.send(embed=info_embed("Production Snapshots", "No readiness snapshots are saved yet."))
+            return
+
+        lines = []
+
+        for snap in list(reversed(snapshots))[:25]:
+            lines.extend([
+                f"**{snap.get('created_at')}**",
+                f"Readiness: `{snap.get('label')}` | Score: `{snap.get('score')}/100`",
+                f"Failed endpoints: `{snap.get('failed')}` | High-risk: `{snap.get('highrisk_events')}` | Secret events: `{snap.get('secret_events')}`",
+                f"Release freeze: `{'on' if snap.get('release_freeze') else 'off'}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Production Snapshots", lines)
+
+    @prod.command(name="report")
+    async def prod_report(self, ctx):
+        """Show full production readiness report."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        report = self.b5_report_text(data)
+        await self.send_paginated(ctx, "Production Readiness Report", report.splitlines())
+
+    @prod.command(name="export")
+    async def prod_export(self, ctx):
+        """Export production readiness report as a text file."""
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        report = self.b5_report_text(data)
+
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Production report exported", "Exported current production readiness report."),
+            file=discord.File(fp, filename="mattis-production-readiness-report.txt")
+        )
+
     @mcore.command(name="apiurl")
     @commands.is_owner()
     async def apiurl(self, ctx, url: str):
