@@ -2328,45 +2328,33 @@ class MattisCore(commands.Cog):
 
 
 
+
+
     async def alerts_ops(self, ctx):
-        """Show active alerts using the Operations Alert Intelligence view."""
+        """Show open operational alerts. Resolved alerts are hidden here."""
         if not await require_admin(ctx):
             return
 
-        changed, state = await self.b3c_normalize_alert_state(ctx.guild)
+        state = await self.b3d_get_alert_state(ctx.guild)
 
-        if not state:
-            await ctx.send(embed=info_embed("Operations Alerts", "No active lifecycle alerts are currently tracked."))
+        open_items = [
+            (alert_id, item)
+            for alert_id, item in state.items()
+            if self.b3d_is_open(item)
+        ]
+
+        open_items.sort(key=self.b3d_alert_sort_key)
+
+        if not open_items:
+            await ctx.send(embed=ok_embed("Operations Alerts", "No open operational alerts are currently tracked. Use `!mcore alerts resolved` to view resolved alerts."))
             return
 
         lines = []
 
-        for alert_id, item in list(state.items())[:30]:
-            title = item.get("title") or self.b3a_human_rule_name(alert_id)
-            status = self.b3a_status_label(item.get("status", "ongoing"))
-            severity = str(item.get("severity") or "unknown").title()
-            count = item.get("count", "?")
-            area = item.get("area", "Unknown")
-            subsystem = item.get("subsystem", "Unknown")
-            owner = item.get("owner", "Unknown")
-            route = item.get("investigation_route", item.get("route", "Unknown"))
-            post_count = item.get("post_count", 0)
-            suppressed = item.get("suppressed_count", 0)
-            action = item.get("recommended_action", "Review the routed logs and confirm whether action is required.")
+        for alert_id, item in open_items[:30]:
+            lines.extend(self.b3d_render_alert_lines(alert_id, item))
 
-            lines.extend([
-                f"**{str(title)[:120]}**",
-                f"Alert ID: `{alert_id}`",
-                f"Status: `{status}` | Severity: `{severity}` | Count: `{count}`",
-                f"Area: `{area}` | Subsystem: `{subsystem}`",
-                f"Owner: `{owner}` | Route: `{route}`",
-                f"Posts: `{post_count}` | Suppressed duplicates: `{suppressed}`",
-                f"Action: {action}",
-                f"Show: `!mcore alerts show {alert_id}`",
-                "",
-            ])
-
-        await self.send_paginated(ctx, "Operations Alerts", lines)
+        await self.send_paginated(ctx, "Open Operations Alerts", lines)
 
     def b3b_now_iso(self) -> str:
         from datetime import datetime, timezone
@@ -2605,6 +2593,345 @@ class MattisCore(commands.Cog):
 
         return changed, new_state
 
+
+
+    async def b3d_get_alert_state(self, guild):
+        """Return normalized alert lifecycle state."""
+        if hasattr(self, "b3c_normalize_alert_state"):
+            changed, state = await self.b3c_normalize_alert_state(guild)
+            return state or {}
+
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        return lifecycle.get("b2_state") or lifecycle.get("state") or {}
+
+    def b3d_is_resolved(self, item: dict) -> bool:
+        item = item or {}
+        status = str(item.get("status") or "").lower()
+        return bool(item.get("resolved")) or status == "resolved"
+
+    def b3d_is_open(self, item: dict) -> bool:
+        return not self.b3d_is_resolved(item)
+
+    def b3d_status_emoji(self, item: dict) -> str:
+        status = str((item or {}).get("status") or "ongoing").lower()
+        severity = str((item or {}).get("severity") or "").lower()
+
+        if status == "resolved":
+            return "✅"
+        if status == "acknowledged":
+            return "👀"
+        if status == "reopened":
+            return "♻️"
+        if severity == "critical":
+            return "🚨"
+        if severity == "high":
+            return "⚠️"
+        if severity == "medium":
+            return "🟡"
+        return "ℹ️"
+
+    def b3d_alert_sort_key(self, pair):
+        alert_id, item = pair
+        sev = str((item or {}).get("severity") or "").lower()
+        status = str((item or {}).get("status") or "").lower()
+
+        sev_rank = {
+            "critical": 0,
+            "high": 1,
+            "medium": 2,
+            "low": 3,
+            "unknown": 4,
+        }.get(sev, 4)
+
+        status_rank = {
+            "reopened": 0,
+            "new": 1,
+            "ongoing": 2,
+            "acknowledged": 3,
+            "updated": 4,
+            "resolved": 9,
+        }.get(status, 5)
+
+        last_seen = str((item or {}).get("last_seen") or "")
+        return (status_rank, sev_rank, last_seen)
+
+    def b3d_render_alert_lines(self, alert_id: str, item: dict, include_action: bool = True, compact: bool = False) -> list[str]:
+        item = item or {}
+
+        title = item.get("title") or self.b3a_human_rule_name(alert_id)
+        status = self.b3a_status_label(item.get("status", "ongoing")) if hasattr(self, "b3a_status_label") else str(item.get("status", "ongoing")).title()
+        severity = str(item.get("severity") or "unknown").title()
+        count = item.get("count", "?")
+        area = item.get("area", "Unknown")
+        owner = item.get("owner", "Unknown")
+        route = item.get("investigation_route", item.get("route", "Unknown"))
+        posts = item.get("post_count", 0)
+        suppressed = item.get("suppressed_count", 0)
+        emoji = self.b3d_status_emoji(item)
+
+        if compact:
+            return [
+                f"{emoji} **{title}** — `{status}` / `{severity}` / Count `{count}` / Owner `{owner}` / `{alert_id}`"
+            ]
+
+        lines = [
+            f"{emoji} **{title}**",
+            f"Alert ID: `{alert_id}`",
+            f"Status: `{status}` | Severity: `{severity}` | Count: `{count}`",
+            f"Area: `{area}` | Owner: `{owner}` | Route: `{route}`",
+            f"Posts: `{posts}` | Suppressed duplicates: `{suppressed}`",
+        ]
+
+        if item.get("acknowledged_by"):
+            lines.append(f"Acknowledged by: `{item.get('acknowledged_by')}`")
+
+        if item.get("assigned_role_name"):
+            lines.append(f"Assigned to: `{item.get('assigned_role_name')}`")
+
+        if item.get("resolved_by"):
+            lines.append(f"Resolved by: `{item.get('resolved_by')}`")
+
+        if include_action:
+            action = item.get("recommended_action", "Review the routed logs and confirm whether action is required.")
+            lines.append(f"Action: {action}")
+
+        lines.extend([
+            f"Show: `!mcore alerts show {alert_id}`",
+            f"Timeline: `!mcore alerts timeline {alert_id}`",
+            "",
+        ])
+
+        return lines
+
+
+    @alerts.command(name="open")
+    async def alerts_open(self, ctx):
+        """Show open/unresolved alerts."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild)
+
+        items = [
+            (alert_id, item)
+            for alert_id, item in state.items()
+            if self.b3d_is_open(item)
+        ]
+
+        items.sort(key=self.b3d_alert_sort_key)
+
+        if not items:
+            await ctx.send(embed=ok_embed("Open Alerts", "No open alerts are currently tracked."))
+            return
+
+        lines = []
+
+        for alert_id, item in items[:30]:
+            lines.extend(self.b3d_render_alert_lines(alert_id, item))
+
+        await self.send_paginated(ctx, "Open Alerts", lines)
+
+    @alerts.command(name="resolved")
+    async def alerts_resolved(self, ctx):
+        """Show resolved alerts."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild)
+
+        items = [
+            (alert_id, item)
+            for alert_id, item in state.items()
+            if self.b3d_is_resolved(item)
+        ]
+
+        items.sort(key=lambda pair: str(pair[1].get("resolved_at") or pair[1].get("last_seen") or ""), reverse=True)
+
+        if not items:
+            await ctx.send(embed=info_embed("Resolved Alerts", "No resolved alerts are currently tracked."))
+            return
+
+        lines = []
+
+        for alert_id, item in items[:30]:
+            lines.extend(self.b3d_render_alert_lines(alert_id, item, include_action=False))
+
+        await self.send_paginated(ctx, "Resolved Alerts", lines)
+
+    @alerts.command(name="all")
+    async def alerts_all(self, ctx):
+        """Show all tracked alerts."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild)
+
+        if not state:
+            await ctx.send(embed=info_embed("All Alerts", "No lifecycle alerts are currently tracked."))
+            return
+
+        items = list(state.items())
+        items.sort(key=self.b3d_alert_sort_key)
+
+        lines = []
+
+        for alert_id, item in items[:50]:
+            lines.extend(self.b3d_render_alert_lines(alert_id, item, include_action=False))
+
+        await self.send_paginated(ctx, "All Tracked Alerts", lines)
+
+    @alerts.command(name="compact")
+    async def alerts_compact(self, ctx):
+        """Show compact one-line alert overview."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild)
+
+        if not state:
+            await ctx.send(embed=info_embed("Compact Alerts", "No lifecycle alerts are currently tracked."))
+            return
+
+        items = list(state.items())
+        items.sort(key=self.b3d_alert_sort_key)
+
+        lines = []
+
+        for alert_id, item in items[:60]:
+            lines.extend(self.b3d_render_alert_lines(alert_id, item, compact=True))
+
+        await self.send_paginated(ctx, "Compact Alerts", lines)
+
+    @alerts.command(name="stats")
+    async def alerts_stats(self, ctx):
+        """Show alert lifecycle stats."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild)
+
+        total = len(state)
+        open_count = 0
+        resolved_count = 0
+        acknowledged_count = 0
+        reopened_count = 0
+        critical = 0
+        high = 0
+        medium = 0
+        low = 0
+        posts = 0
+        suppressed = 0
+
+        by_area = {}
+
+        for item in state.values():
+            status = str(item.get("status") or "").lower()
+            severity = str(item.get("severity") or "").lower()
+            area = item.get("area") or "Unknown"
+
+            if self.b3d_is_resolved(item):
+                resolved_count += 1
+            else:
+                open_count += 1
+
+            if status == "acknowledged":
+                acknowledged_count += 1
+            if status == "reopened":
+                reopened_count += 1
+
+            if severity == "critical":
+                critical += 1
+            elif severity == "high":
+                high += 1
+            elif severity == "medium":
+                medium += 1
+            else:
+                low += 1
+
+            posts += int(item.get("post_count", 0) or 0)
+            suppressed += int(item.get("suppressed_count", 0) or 0)
+
+            by_area[area] = by_area.get(area, 0) + 1
+
+        lines = [
+            f"Total tracked alerts: `{total}`",
+            f"Open: `{open_count}`",
+            f"Resolved: `{resolved_count}`",
+            f"Acknowledged: `{acknowledged_count}`",
+            f"Reopened: `{reopened_count}`",
+            "",
+            "**Severity:**",
+            f"Critical: `{critical}`",
+            f"High: `{high}`",
+            f"Medium: `{medium}`",
+            f"Low/Unknown: `{low}`",
+            "",
+            "**Lifecycle volume:**",
+            f"Posts: `{posts}`",
+            f"Suppressed duplicates: `{suppressed}`",
+            "",
+            "**By area:**",
+        ]
+
+        if by_area:
+            for area, count in sorted(by_area.items(), key=lambda x: x[0]):
+                lines.append(f"{area}: `{count}`")
+        else:
+            lines.append("None")
+
+        await self.send_paginated(ctx, "Alert Stats", lines)
+
+    @alerts.command(name="history")
+    async def alerts_history(self, ctx, *, alert_id: str = ""):
+        """Show timeline history. Without an ID, shows all recent alert timeline events."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b3d_get_alert_state(ctx.guild)
+
+        if alert_id:
+            key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+            if not item:
+                await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+                return
+
+            await self.alerts_timeline(ctx, alert_id=alert_id)
+            return
+
+        events = []
+
+        for key, item in state.items():
+            title = item.get("title") or key
+
+            for entry in item.get("timeline") or []:
+                events.append({
+                    "alert_id": key,
+                    "title": title,
+                    "at": entry.get("at", ""),
+                    "action": entry.get("action", ""),
+                    "actor": entry.get("actor", ""),
+                    "details": entry.get("details", ""),
+                })
+
+        events.sort(key=lambda x: str(x.get("at", "")), reverse=True)
+
+        if not events:
+            await ctx.send(embed=info_embed("Alert History", "No timeline history is currently tracked."))
+            return
+
+        lines = []
+
+        for event in events[:40]:
+            details = event.get("details") or ""
+            if details:
+                lines.append(f"`{event.get('at')}` — **{event.get('title')}** — `{event.get('action')}` by `{event.get('actor')}` — {details}")
+            else:
+                lines.append(f"`{event.get('at')}` — **{event.get('title')}** — `{event.get('action')}` by `{event.get('actor')}`")
+
+        await self.send_paginated(ctx, "Recent Alert History", lines)
 
     @alerts.command(name="normalize")
     async def alerts_normalize(self, ctx):
