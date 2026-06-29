@@ -4804,6 +4804,563 @@ class MattisCore(commands.Cog):
         await self.send_paginated(ctx, "Role Access Check", lines)
 
 
+
+    def doctor_compact_slug(self, value: str) -> str:
+        return self.route_slug(value).replace("_", "")
+
+    def doctor_find_role(self, guild: discord.Guild, role_name: str):
+        wanted = self.doctor_compact_slug(role_name)
+
+        for role in guild.roles:
+            if role == guild.default_role or role.managed:
+                continue
+
+            if self.doctor_compact_slug(role.name) == wanted:
+                return role
+
+        for role in guild.roles:
+            if role == guild.default_role or role.managed:
+                continue
+
+            if wanted in self.doctor_compact_slug(role.name):
+                return role
+
+        return None
+
+    def doctor_role_caps(self, role: discord.Role, caps: dict[str, list[int]]) -> set[str]:
+        found = set()
+
+        for cap, ids in caps.items():
+            if role and role.id in [int(x) for x in ids or []]:
+                found.add(cap)
+
+        return found
+
+    def doctor_command_rules(self) -> dict:
+        return {
+            "core": {
+                "label": "!mcore routecheck / config / dangerous settings",
+                "capabilities": ["core_admin"],
+            },
+            "billing": {
+                "label": "!mbilling summary / invoices / payments / refunds",
+                "capabilities": ["billing_support", "finance_view"],
+            },
+            "support": {
+                "label": "!msupport / !mcrm general support",
+                "capabilities": ["general_support", "support_lead"],
+            },
+            "technical_support": {
+                "label": "technical support / troubleshooting",
+                "capabilities": ["technical_support", "support_lead"],
+            },
+            "security": {
+                "label": "!msecurity risks / suspicious activity / account compromise",
+                "capabilities": ["security_support", "security_admin", "incident_response"],
+            },
+            "audit": {
+                "label": "!maudit recent / high-risk audit review",
+                "capabilities": ["audit_review", "security_admin", "management_view"],
+            },
+            "incident": {
+                "label": "!mincident active / incident checks",
+                "capabilities": ["incident_response", "security_admin", "production_access", "management_view"],
+            },
+            "status_safe": {
+                "label": "!mstatus safe/system visibility",
+                "capabilities": ["technical_support", "development_read", "production_access", "infrastructure_admin", "management_view"],
+            },
+            "backend": {
+                "label": "!mmodules / backend/API/module checks",
+                "capabilities": ["backend_access", "infrastructure_admin"],
+            },
+            "production": {
+                "label": "production diagnostics / production status",
+                "capabilities": ["production_access", "release_manager", "infrastructure_admin"],
+            },
+            "release": {
+                "label": "release manager / staging / production release commands",
+                "capabilities": ["release_manager"],
+            },
+            "qa": {
+                "label": "QA/testing/staging validation",
+                "capabilities": ["qa_testing"],
+            },
+            "design": {
+                "label": "design/assets/UI checks",
+                "capabilities": ["design_access"],
+            },
+            "discord_systems": {
+                "label": "!mdiscord integration/system checks",
+                "capabilities": ["discord_systems", "infrastructure_admin"],
+            },
+            "roblox_systems": {
+                "label": "!mroblox integration/system checks",
+                "capabilities": ["roblox_systems", "infrastructure_admin"],
+            },
+            "automation": {
+                "label": "!mautomation workers / failed jobs",
+                "capabilities": ["automation_access", "infrastructure_admin"],
+            },
+            "workspace": {
+                "label": "!mworkspace / safe staff workspace",
+                "capabilities": [
+                    "general_support",
+                    "support_lead",
+                    "billing_support",
+                    "technical_support",
+                    "security_support",
+                    "moderation",
+                    "incident_response",
+                    "audit_review",
+                    "development_read",
+                    "backend_access",
+                    "production_access",
+                    "release_manager",
+                    "qa_testing",
+                    "design_access",
+                    "management_view",
+                    "finance_view",
+                    "infrastructure_admin",
+                    "security_admin",
+                ],
+            },
+        }
+
+    def doctor_can_use_rule(self, role: discord.Role, caps: dict[str, list[int]], rule_key: str) -> bool:
+        if not role:
+            return False
+
+        role_caps = self.doctor_role_caps(role, caps)
+
+        if "core_admin" in role_caps:
+            return True
+
+        rules = self.doctor_command_rules()
+        rule = rules.get(rule_key)
+
+        if not rule:
+            return False
+
+        return bool(role_caps.intersection(set(rule["capabilities"])))
+
+    def doctor_expected_role_tests(self) -> list[dict]:
+        return [
+            {
+                "role": "Billing Support",
+                "allow": ["billing", "workspace"],
+                "deny": ["core", "support", "technical_support", "security", "audit", "incident", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Technical Support",
+                "allow": ["technical_support", "status_safe", "workspace"],
+                "deny": ["core", "billing", "support", "security", "audit", "incident", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Security Support",
+                "allow": ["security", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "audit", "incident", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Support Agent",
+                "allow": ["support", "workspace"],
+                "deny": ["core", "billing", "technical_support", "security", "audit", "incident", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Support Lead",
+                "allow": ["support", "technical_support", "workspace"],
+                "deny": ["core", "billing", "security", "audit", "incident", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Release Manager",
+                "allow": ["release", "status_safe", "production", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "audit", "incident", "backend", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Designer",
+                "allow": ["design", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "audit", "incident", "status_safe", "backend", "production", "release", "qa", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "QA Tester",
+                "allow": ["qa", "status_safe", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "audit", "incident", "backend", "production", "release", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Developer",
+                "allow": ["status_safe", "backend", "discord_systems", "roblox_systems", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "audit", "incident", "production", "release", "qa", "design", "automation"],
+            },
+            {
+                "role": "Lead Developer",
+                "allow": ["status_safe", "backend", "production", "incident", "discord_systems", "roblox_systems", "automation", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "audit", "release", "qa", "design"],
+            },
+            {
+                "role": "Infrastructure Admin",
+                "allow": ["status_safe", "production", "incident", "discord_systems", "roblox_systems", "automation", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "audit", "backend", "release", "qa", "design"],
+            },
+            {
+                "role": "Security Admin",
+                "allow": ["security", "audit", "incident", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "status_safe", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Audit Reviewer",
+                "allow": ["audit", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "security", "incident", "status_safe", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Incident Response",
+                "allow": ["security", "incident", "workspace"],
+                "deny": ["core", "billing", "support", "technical_support", "audit", "status_safe", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Director",
+                "allow": ["billing", "audit", "incident"],
+                "deny": ["core", "support", "technical_support", "security", "status_safe", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+            {
+                "role": "Executive",
+                "allow": ["billing", "audit", "incident"],
+                "deny": ["core", "support", "technical_support", "security", "status_safe", "backend", "production", "release", "qa", "design", "discord_systems", "roblox_systems", "automation"],
+            },
+        ]
+
+    def doctor_simulate_role_tests(self, guild: discord.Guild, caps: dict[str, list[int]]) -> tuple[list[str], int, int]:
+        lines = []
+        failures = 0
+        warnings = 0
+
+        rules = self.doctor_command_rules()
+
+        for test in self.doctor_expected_role_tests():
+            role = self.doctor_find_role(guild, test["role"])
+
+            if not role:
+                lines.append(f"⚠️ `{test['role']}` role not found.")
+                warnings += 1
+                continue
+
+            role_caps = sorted(self.doctor_role_caps(role, caps))
+            role_lines = [f"**{role.mention}**", f"Capabilities: `{', '.join(role_caps) if role_caps else 'none'}`"]
+
+            for allow_key in test["allow"]:
+                allowed = self.doctor_can_use_rule(role, caps, allow_key)
+                label = rules[allow_key]["label"]
+
+                if allowed:
+                    role_lines.append(f"✅ should allow `{allow_key}` — {label}")
+                else:
+                    role_lines.append(f"❌ FAIL should allow `{allow_key}` — {label}")
+                    failures += 1
+
+            for deny_key in test["deny"]:
+                allowed = self.doctor_can_use_rule(role, caps, deny_key)
+                label = rules[deny_key]["label"]
+
+                if allowed:
+                    role_lines.append(f"❌ FAIL should deny `{deny_key}` — {label}")
+                    failures += 1
+                else:
+                    role_lines.append(f"✅ denied `{deny_key}` — {label}")
+
+            lines.append("\n".join(role_lines))
+
+        return lines, failures, warnings
+
+    def doctor_unsafe_capability_mappings(self, guild: discord.Guild, caps: dict[str, list[int]]) -> tuple[list[str], int, int]:
+        lines = []
+        failures = 0
+        warnings = 0
+
+        for capability, role_ids in sorted(caps.items()):
+            for rid in role_ids or []:
+                role = guild.get_role(int(rid))
+
+                if not role:
+                    lines.append(f"⚠️ `{capability}` has missing role id `{rid}`.")
+                    warnings += 1
+                    continue
+
+                if role == guild.default_role:
+                    lines.append(f"❌ `{capability}` is mapped to @everyone.")
+                    failures += 1
+                    continue
+
+                if role.managed:
+                    lines.append(f"❌ `{capability}` is mapped to managed role {role.mention}.")
+                    failures += 1
+                    continue
+
+                if self.is_separator_role(role):
+                    lines.append(f"❌ `{capability}` is mapped to separator/header role {role.mention}.")
+                    failures += 1
+                    continue
+
+                if role.name.lower().strip() in ["bots", "bot"]:
+                    lines.append(f"❌ `{capability}` is mapped to bot role {role.mention}.")
+                    failures += 1
+                    continue
+
+        if not lines:
+            lines.append("✅ No unsafe capability role mappings found.")
+
+        return lines, failures, warnings
+
+    def doctor_source_gate_audit(self) -> tuple[list[str], int, int]:
+        from pathlib import Path
+
+        lines = []
+        failures = 0
+        warnings = 0
+
+        bad_gates = [
+            "require_staff(ctx)",
+            "require_development(ctx)",
+            "require_security(ctx)",
+            "require_support(ctx)",
+        ]
+
+        try:
+            root = Path(__file__).resolve().parents[1]
+
+            for path in sorted(root.glob("mattis_*/*.py")):
+                if path.name == "shared_mattis.py":
+                    continue
+
+                if path.parent.name == "mattis_core":
+                    continue
+
+                text = path.read_text(errors="ignore")
+                found = []
+
+                for line_no, line in enumerate(text.splitlines(), start=1):
+                    for gate in bad_gates:
+                        if gate in line:
+                            found.append(f"L{line_no}: `{line.strip()}`")
+
+                if found:
+                    failures += len(found)
+                    lines.append(f"❌ **{path.parent.name}/{path.name}** still has broad gates:\n" + "\n".join(found))
+
+        except Exception as exc:
+            warnings += 1
+            lines.append(f"⚠️ Could not scan command source gates: `{type(exc).__name__}: {exc}`")
+
+        if not lines:
+            lines.append("✅ No broad command gates found in non-core cogs.")
+
+        return lines, failures, warnings
+
+    async def doctor_route_audit(self, guild: discord.Guild) -> tuple[list[str], int, int]:
+        lines = []
+        failures = 0
+        warnings = 0
+
+        try:
+            cfg = await get_core_config(self.bot)
+            routes = await cfg.guild(guild).routes()
+            routes = routes or {}
+
+            missing = []
+            custom = []
+
+            for key, value in routes.items():
+                channel_id = value
+
+                if isinstance(value, dict):
+                    channel_id = value.get("channel_id") or value.get("id")
+
+                try:
+                    channel = guild.get_channel(int(channel_id))
+                except Exception:
+                    channel = None
+
+                if not channel:
+                    missing.append(f"`{key}` → missing `{channel_id}`")
+
+                if key == "support":
+                    custom.append(f"`{key}` → custom fallback route")
+
+            lines.append(f"Saved routes: `{len(routes)}`")
+
+            if missing:
+                failures += len(missing)
+                lines.append("❌ Missing channels:\n" + "\n".join(missing[:25]))
+            else:
+                lines.append("✅ Missing channels: `0`")
+
+            if custom:
+                lines.append("ℹ️ Custom fallback routes:\n" + "\n".join(custom))
+
+        except Exception as exc:
+            warnings += 1
+            lines.append(f"⚠️ Could not audit routes: `{type(exc).__name__}: {exc}`")
+
+        return lines, failures, warnings
+
+    async def doctor_engine_settings(self, guild: discord.Guild) -> tuple[list[str], int, int]:
+        lines = []
+        failures = 0
+        warnings = 0
+
+        try:
+            cfg = await get_core_config(self.bot)
+
+            checks = [
+                ("log_settings", "Logs"),
+                ("alert_settings", "Alerts"),
+                ("notify_settings", "Notify"),
+                ("eventlog_settings", "Event logs"),
+            ]
+
+            for attr, label in checks:
+                try:
+                    data = await getattr(cfg.guild(guild), attr)()
+                    data = data or {}
+
+                    enabled = data.get("enabled")
+                    if enabled is None:
+                        enabled = data.get("global_enabled")
+
+                    if enabled is True:
+                        lines.append(f"✅ {label}: enabled")
+                    elif enabled is False:
+                        lines.append(f"⚠️ {label}: disabled")
+                        warnings += 1
+                    else:
+                        lines.append(f"ℹ️ {label}: settings found")
+                except Exception as exc:
+                    lines.append(f"⚠️ {label}: could not read settings `{type(exc).__name__}`")
+                    warnings += 1
+
+        except Exception as exc:
+            warnings += 1
+            lines.append(f"⚠️ Could not audit engine settings: `{type(exc).__name__}: {exc}`")
+
+        return lines, failures, warnings
+
+    @mcore.group(name="doctor", invoke_without_command=True)
+    async def doctor(self, ctx):
+        """Full Mattis Systems safety/readiness doctor."""
+        if not await require_admin(ctx):
+            return
+
+        caps = await self.saved_capabilities(ctx.guild)
+
+        all_lines = []
+        failures = 0
+        warnings = 0
+
+        all_lines.append("**1. Route audit**")
+        lines, f, w = await self.doctor_route_audit(ctx.guild)
+        all_lines.extend(lines)
+        failures += f
+        warnings += w
+        all_lines.append("")
+
+        all_lines.append("**2. Engine settings**")
+        lines, f, w = await self.doctor_engine_settings(ctx.guild)
+        all_lines.extend(lines)
+        failures += f
+        warnings += w
+        all_lines.append("")
+
+        all_lines.append("**3. Unsafe capability mappings**")
+        lines, f, w = self.doctor_unsafe_capability_mappings(ctx.guild, caps)
+        all_lines.extend(lines)
+        failures += f
+        warnings += w
+        all_lines.append("")
+
+        all_lines.append("**4. Command gate source audit**")
+        lines, f, w = self.doctor_source_gate_audit()
+        all_lines.extend(lines)
+        failures += f
+        warnings += w
+        all_lines.append("")
+
+        all_lines.append("**5. Simulated role permission tests**")
+        lines, f, w = self.doctor_simulate_role_tests(ctx.guild, caps)
+        all_lines.extend(lines)
+        failures += f
+        warnings += w
+
+        if failures:
+            title = f"Mattis Doctor: FAIL — {failures} failures, {warnings} warnings"
+            color = discord.Color.red()
+        elif warnings:
+            title = f"Mattis Doctor: WARN — {warnings} warnings"
+            color = discord.Color.orange()
+        else:
+            title = "Mattis Doctor: PASS"
+            color = discord.Color.green()
+
+        await self.send_paginated(ctx, title, all_lines, color=color)
+
+    @doctor.command(name="roles")
+    async def doctor_roles(self, ctx):
+        """Run only the simulated role permission tests."""
+        if not await require_admin(ctx):
+            return
+
+        caps = await self.saved_capabilities(ctx.guild)
+        lines, failures, warnings = self.doctor_simulate_role_tests(ctx.guild, caps)
+
+        if failures:
+            title = f"Doctor Role Tests: FAIL — {failures} failures"
+            color = discord.Color.red()
+        elif warnings:
+            title = f"Doctor Role Tests: WARN — {warnings} warnings"
+            color = discord.Color.orange()
+        else:
+            title = "Doctor Role Tests: PASS"
+            color = discord.Color.green()
+
+        await self.send_paginated(ctx, title, lines, color=color)
+
+    @doctor.command(name="gates")
+    async def doctor_gates(self, ctx):
+        """Run only the source command gate audit."""
+        if not await require_admin(ctx):
+            return
+
+        lines, failures, warnings = self.doctor_source_gate_audit()
+
+        if failures:
+            title = f"Doctor Gate Audit: FAIL — {failures} broad gates found"
+            color = discord.Color.red()
+        elif warnings:
+            title = f"Doctor Gate Audit: WARN — {warnings} warnings"
+            color = discord.Color.orange()
+        else:
+            title = "Doctor Gate Audit: PASS"
+            color = discord.Color.green()
+
+        await self.send_paginated(ctx, title, lines, color=color)
+
+    @doctor.command(name="routes")
+    async def doctor_routes(self, ctx):
+        """Run only the route audit."""
+        if not await require_admin(ctx):
+            return
+
+        lines, failures, warnings = await self.doctor_route_audit(ctx.guild)
+
+        if failures:
+            title = f"Doctor Route Audit: FAIL — {failures} missing routes"
+            color = discord.Color.red()
+        elif warnings:
+            title = f"Doctor Route Audit: WARN — {warnings} warnings"
+            color = discord.Color.orange()
+        else:
+            title = "Doctor Route Audit: PASS"
+            color = discord.Color.green()
+
+        await self.send_paginated(ctx, title, lines, color=color)
+
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):
         """Check saved routes against current Discord channels."""
