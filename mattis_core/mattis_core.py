@@ -2310,70 +2310,107 @@ class MattisCore(commands.Cog):
         await ctx.send(embed=e)
 
 
+
+    @alerts.command(name="enrich")
+    async def alerts_enrich(self, ctx):
+        """Backfill current lifecycle state with Operations Alert Intelligence fields."""
+        if not await require_admin(ctx):
+            return
+
+        changed, state = await self.b3a_enrich_all_alert_state(ctx.guild)
+
+        await ctx.send(embed=ok_embed(
+            "Alert intelligence enriched",
+            f"Enriched `{changed}` tracked alert(s). Use `!mcore alerts ops` to view them."
+        ))
+
+    @alerts.command(name="ops")
+    async def alerts_ops(self, ctx):
+        """Show active alerts using the Operations Alert Intelligence view."""
+        if not await require_admin(ctx):
+            return
+
+        changed, state = await self.b3a_enrich_all_alert_state(ctx.guild)
+
+        if not state:
+            await ctx.send(embed=info_embed("Operations Alerts", "No active lifecycle alerts are currently tracked."))
+            return
+
+        lines = []
+
+        for alert_id, item in list(state.items())[:30]:
+            title = item.get("title") or self.b3a_human_rule_name(alert_id)
+            status = self.b3a_status_label(item.get("status", "ongoing"))
+            severity = str(item.get("severity") or "unknown").title()
+            count = item.get("count", "?")
+            area = item.get("area", "Unknown")
+            subsystem = item.get("subsystem", "Unknown")
+            owner = item.get("owner", "Unknown")
+            route = item.get("investigation_route", item.get("route", "Unknown"))
+            post_count = item.get("post_count", 0)
+            suppressed = item.get("suppressed_count", 0)
+            action = item.get("recommended_action", "Review the routed logs and confirm whether action is required.")
+
+            lines.extend([
+                f"**{title}**",
+                f"Status: `{status}` | Severity: `{severity}` | Count: `{count}`",
+                f"Area: `{area}` | Subsystem: `{subsystem}`",
+                f"Owner: `{owner}` | Route: `{route}`",
+                f"Posts: `{post_count}` | Suppressed duplicates: `{suppressed}`",
+                f"Action: {action}",
+                f"Show: `!mcore alerts show {str(alert_id)[:40]}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Operations Alerts", lines)
+
     @alerts.command(name="show")
+
     async def alerts_show(self, ctx, *, alert_id: str):
         """Show a full operational view of an alert."""
         if not await require_admin(ctx):
             return
 
-        cfg = await get_core_config(self.bot)
-        lifecycle = await cfg.guild(ctx.guild).alert_lifecycle()
-        lifecycle = lifecycle or {}
-        state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
+        key, item = await self.b3a_find_alert_state_item(ctx.guild, alert_id)
 
-        found_key = None
-        found = None
-        q = str(alert_id or "").lower().strip()
-
-        for key, item in state.items():
-            if q in str(key).lower() or q in str(item.get("title", "")).lower():
-                found_key = key
-                found = item
-                break
-
-        if not found:
-            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title. Try `!mcore alerts ops`."))
             return
 
-        embed = await self.b3a_render_alert_embed(ctx.guild, meta=found)
+        embed = await self.b3a_render_alert_embed(ctx.guild, meta=item)
         await ctx.send(embed=embed)
 
     @alerts.command(name="explain")
+
     async def alerts_explain(self, ctx, *, alert_id: str):
         """Explain what an alert means and what staff should do."""
         if not await require_admin(ctx):
             return
 
-        cfg = await get_core_config(self.bot)
-        lifecycle = await cfg.guild(ctx.guild).alert_lifecycle()
-        lifecycle = lifecycle or {}
-        state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
-
-        found_key = None
-        item = None
-        q = str(alert_id or "").lower().strip()
-
-        for key, value in state.items():
-            if q in str(key).lower() or q in str(value.get("title", "")).lower():
-                found_key = key
-                item = value
-                break
+        key, item = await self.b3a_find_alert_state_item(ctx.guild, alert_id)
 
         if not item:
-            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title. Try `!mcore alerts ops`."))
             return
 
         lines = [
-            f"**{item.get('title', found_key)}**",
+            f"**{item.get('title', key)}**",
             "",
             f"**What happened:** {item.get('plain_summary', 'Unknown')}",
+            f"**Detailed summary:** {item.get('detailed_summary', 'Unknown')}",
+            "",
             f"**Why it matters:** {item.get('why_it_matters', 'Unknown')}",
+            "",
             f"**Severity:** {str(item.get('severity', 'unknown')).title()}",
             f"**Severity reason:** {item.get('severity_reason', 'Unknown')}",
+            f"**Count:** `{item.get('count', '?')}`",
+            f"**Trend:** {item.get('trend', 'Unknown')}",
             "",
             f"**Customer impact:** {item.get('customer_impact', 'Unknown')}",
             f"**Internal impact:** {item.get('internal_impact', 'Unknown')}",
             "",
+            f"**Affected area:** {item.get('area', 'Unknown')}",
+            f"**Subsystem:** {item.get('subsystem', 'Unknown')}",
             f"**Owner team:** {item.get('owner', 'Unknown')}",
             f"**Escalation path:** {item.get('escalation', 'Unknown')}",
             "",
@@ -2386,52 +2423,87 @@ class MattisCore(commands.Cog):
         for cmd in item.get("related_commands", [])[:8]:
             lines.append(f"`{cmd}`")
 
+        lines.extend([
+            "",
+            "**Lifecycle:**",
+            f"Posts: `{item.get('post_count', 0)}`",
+            f"Suppressed duplicates: `{item.get('suppressed_count', 0)}`",
+            f"Alert ID: `{str(key)[:180]}`",
+        ])
+
         await self.send_paginated(ctx, "Alert Explanation", lines)
 
     @alerts.command(name="investigate")
+
     async def alerts_investigate(self, ctx, *, alert_id: str):
         """Show investigation steps for an alert."""
         if not await require_admin(ctx):
             return
 
-        cfg = await get_core_config(self.bot)
-        lifecycle = await cfg.guild(ctx.guild).alert_lifecycle()
-        lifecycle = lifecycle or {}
-        state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
-
-        item = None
-        q = str(alert_id or "").lower().strip()
-
-        for key, value in state.items():
-            if q in str(key).lower() or q in str(value.get("title", "")).lower():
-                item = value
-                break
+        key, item = await self.b3a_find_alert_state_item(ctx.guild, alert_id)
 
         if not item:
-            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title. Try `!mcore alerts ops`."))
             return
 
         area = str(item.get("area", "")).lower()
 
         steps = [
-            f"**Alert:** {item.get('title', 'Unknown')}",
+            f"**Alert:** {item.get('title', key)}",
+            f"**Status:** {self.b3a_status_label(item.get('status', 'ongoing'))}",
+            f"**Severity:** {str(item.get('severity', 'unknown')).title()}",
             f"**Route:** {item.get('investigation_route', 'Unknown')}",
             f"**Owner:** {item.get('owner', 'Unknown')}",
+            f"**Escalation:** {item.get('escalation', 'Unknown')}",
             "",
             "**Investigation steps:**",
             "1. Open the investigation route and review the newest related entries.",
-            "2. Check whether the event was expected, planned, or caused by staff action.",
-            "3. Compare the event time with recent deployments, config changes, staff actions, or customer reports.",
-            "4. Confirm whether customer-facing services are affected.",
-            "5. If suspicious or high impact, escalate using the escalation path.",
+            "2. Check what changed immediately before the alert first appeared.",
+            "3. Confirm whether the activity was expected, planned, or caused by a staff action.",
+            "4. Check whether customer-facing systems, billing, support, or security are affected.",
+            "5. If the activity is suspicious, unauthorised, or customer-impacting, escalate using the escalation path.",
+            "6. Once confirmed safe/resolved, update the alert lifecycle when resolution commands are added in the next batch.",
             "",
-            f"**Escalation path:** {item.get('escalation', 'Unknown')}",
+            "**What to look for:**",
+        ]
+
+        if "audit" in area or "security" in area:
+            steps.extend([
+                "- Recent permission, route, capability, token, admin, or staff-access changes.",
+                "- Any action performed by an unexpected staff account.",
+                "- Any repeated or unusual sensitive event pattern.",
+                "- Whether the high-risk audit entry matches something you intentionally changed.",
+            ])
+        elif "api" in area or "backend" in area:
+            steps.extend([
+                "- API health and protected endpoint auth.",
+                "- Nginx/API upstream errors.",
+                "- systemd restarts or process crashes.",
+                "- Recent backend deployments or env changes.",
+            ])
+        elif "billing" in area:
+            steps.extend([
+                "- Failed payment/invoice customer records.",
+                "- Stripe/webhook errors.",
+                "- Customer access changes caused by billing state.",
+                "- Refund/chargeback evidence.",
+            ])
+        else:
+            steps.extend([
+                "- Newest routed logs.",
+                "- Recent config changes.",
+                "- Related doctor warnings/failures.",
+                "- Whether the alert count is increasing.",
+            ])
+
+        steps.extend([
             "",
             "**Useful commands:**",
-            "`!mcore alerts active`",
+            "`!mcore alerts ops`",
+            "`!mcore alerts show <alert_id>`",
             "`!mcore alerts explain <alert_id>`",
             "`!mcore doctor`",
-        ]
+        ])
 
         if "audit" in area or "security" in area:
             steps.extend([
@@ -2442,10 +2514,6 @@ class MattisCore(commands.Cog):
             steps.extend([
                 "`!mcore doctor api`",
                 "`!mcore doctor settings`",
-            ])
-        elif "billing" in area:
-            steps.extend([
-                "`!mcore doctor api`",
             ])
 
         await self.send_paginated(ctx, "Alert Investigation", steps)
@@ -7322,6 +7390,111 @@ class MattisCore(commands.Cog):
             return "No material field changes detected. This post exists because the alert content fingerprint changed."
 
         return "\n".join(changes[:6])
+
+
+    async def b3a_enrich_existing_alert_item(self, guild, alert_id: str, item: dict) -> dict:
+        """Rebuild missing Operations Alert Intelligence fields from old/raw lifecycle state."""
+        item = item or {}
+        raw = " ".join([
+            str(alert_id or ""),
+            str(item.get("identity") or ""),
+            str(item.get("rule") or ""),
+            str(item.get("title") or ""),
+            str(item.get("raw_reference") or ""),
+            str(item.get("route") or ""),
+        ])
+
+        meta = await self.b3a_build_alert_intelligence(
+            guild,
+            embed=None,
+            content=raw,
+            identity=alert_id or item.get("identity") or item.get("rule") or "unknown",
+            fingerprint=item.get("fingerprint", ""),
+            existing=item,
+            status=item.get("status") or "ongoing",
+        )
+
+        merged = dict(item)
+        merged.update(meta)
+
+        # Preserve existing lifecycle stats.
+        for key in [
+            "first_seen",
+            "last_seen",
+            "last_posted",
+            "last_channel_id",
+            "last_message_id",
+            "post_count",
+            "suppressed_count",
+            "fingerprint",
+            "identity",
+            "status",
+        ]:
+            if item.get(key) is not None:
+                merged[key] = item.get(key)
+
+        if not merged.get("identity"):
+            merged["identity"] = alert_id
+
+        if not merged.get("alert_id") or merged.get("alert_id") == "unknown":
+            merged["alert_id"] = alert_id
+
+        if not merged.get("rule_id") or merged.get("rule_id") == "unknown":
+            merged["rule_id"] = alert_id
+
+        if not merged.get("title") or str(merged.get("title")).lower() in {"unknown", "none"}:
+            merged["title"] = self.b3a_human_rule_name(alert_id)
+
+        return merged
+
+    async def b3a_find_alert_state_item(self, guild, query: str):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
+
+        q = str(query or "").lower().strip()
+
+        for key, item in state.items():
+            haystack = " ".join([
+                str(key),
+                str(item.get("identity", "")),
+                str(item.get("alert_id", "")),
+                str(item.get("rule_id", "")),
+                str(item.get("title", "")),
+                str(item.get("area", "")),
+            ]).lower()
+
+            if q in haystack:
+                enriched = await self.b3a_enrich_existing_alert_item(guild, key, item)
+
+                # Save back enriched state.
+                state[key] = enriched
+                lifecycle["b2_state"] = state
+                await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+                return key, enriched
+
+        return None, None
+
+    async def b3a_enrich_all_alert_state(self, guild):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
+
+        changed = 0
+        new_state = {}
+
+        for key, item in state.items():
+            enriched = await self.b3a_enrich_existing_alert_item(guild, key, item)
+            new_state[key] = enriched
+            changed += 1
+
+        lifecycle["b2_state"] = new_state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+        return changed, new_state
 
     async def b3a_build_alert_intelligence(self, guild, embed=None, content=None, identity=None, fingerprint=None, existing=None, status=None) -> dict:
         existing = existing or {}
