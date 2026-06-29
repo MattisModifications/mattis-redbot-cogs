@@ -4868,11 +4868,11 @@ class MattisCore(commands.Cog):
             },
             "status_safe": {
                 "label": "!mstatus safe/system visibility",
-                "capabilities": ["technical_support", "development_read", "production_access", "infrastructure_admin", "management_view"],
+                "capabilities": ["technical_support", "development_read", "production_access", "infrastructure_admin"],
             },
             "backend": {
                 "label": "!mmodules / backend/API/module checks",
-                "capabilities": ["backend_access", "infrastructure_admin"],
+                "capabilities": ["backend_access"],
             },
             "production": {
                 "label": "production diagnostics / production status",
@@ -5154,6 +5154,132 @@ class MattisCore(commands.Cog):
 
         return lines, failures, warnings
 
+
+    async def doctor_get_routes_map(self, guild: discord.Guild) -> dict:
+        import inspect
+
+        # First try live helper methods already on MattisCore.
+        for method_name in [
+            "saved_routes",
+            "get_saved_routes",
+            "load_routes",
+            "get_route_map",
+            "saved_channel_routes",
+            "channel_routes",
+        ]:
+            method = getattr(self, method_name, None)
+
+            if not method or not callable(method):
+                continue
+
+            try:
+                sig = inspect.signature(method)
+                params = list(sig.parameters)
+
+                if len(params) == 0:
+                    value = await method()
+                else:
+                    value = await method(guild)
+
+                if isinstance(value, dict) and value:
+                    return value
+            except Exception:
+                pass
+
+        cfg = await get_core_config(self.bot)
+
+        # Then try known config names.
+        names = [
+            "routes",
+            "channel_routes",
+            "route_map",
+            "routing",
+            "saved_routes",
+            "channel_map",
+            "route_settings",
+            "routes_map",
+            "route_data",
+        ]
+
+        for name in names:
+            try:
+                value = await getattr(cfg.guild(guild), name)()
+                if isinstance(value, dict) and value:
+                    return value
+            except Exception:
+                pass
+
+        try:
+            all_data = await cfg.guild(guild).all()
+        except Exception:
+            all_data = {}
+
+        for name in names:
+            value = all_data.get(name)
+            if isinstance(value, dict) and value:
+                return value
+
+        def value_channel_id(value):
+            if isinstance(value, dict):
+                return value.get("channel_id") or value.get("id")
+            return value
+
+        best = {}
+        best_score = 0
+
+        def score_dict(obj: dict) -> int:
+            score = 0
+
+            for key, value in obj.items():
+                key_text = str(key).lower()
+                channel_id = value_channel_id(value)
+
+                try:
+                    if guild.get_channel(int(channel_id)):
+                        score += 5
+                except Exception:
+                    pass
+
+                if any(word in key_text for word in [
+                    "billing",
+                    "support",
+                    "security",
+                    "development",
+                    "management",
+                    "observatory",
+                    "logs",
+                    "route",
+                    "channel",
+                    "ticket",
+                    "incident",
+                    "audit",
+                    "message",
+                    "member",
+                ]):
+                    score += 2
+
+            return score
+
+        def scan(obj):
+            nonlocal best, best_score
+
+            if not isinstance(obj, dict):
+                return
+
+            score = score_dict(obj)
+
+            if score > best_score and len(obj) >= 3:
+                best = obj
+                best_score = score
+
+            for value in obj.values():
+                if isinstance(value, dict):
+                    scan(value)
+
+        scan(all_data)
+
+        return best or {}
+
     async def doctor_route_audit(self, guild: discord.Guild) -> tuple[list[str], int, int]:
         lines = []
         failures = 0
@@ -5306,11 +5432,11 @@ class MattisCore(commands.Cog):
             },
             "status_safe": {
                 "label": "!mstatus safe/system visibility",
-                "capabilities": ["technical_support", "development_read", "production_access", "infrastructure_admin", "management_view"],
+                "capabilities": ["technical_support", "development_read", "production_access", "infrastructure_admin"],
             },
             "backend": {
                 "label": "!mmodules backend/API/module checks",
-                "capabilities": ["backend_access", "infrastructure_admin"],
+                "capabilities": ["backend_access"],
             },
             "production": {
                 "label": "production diagnostics / system health",
@@ -5669,14 +5795,139 @@ class MattisCore(commands.Cog):
 
         return lines, failures, warnings
 
+
+    async def doctor_get_routes_map(self, guild: discord.Guild) -> dict:
+        import inspect
+
+        # First try live helper methods already on MattisCore.
+        for method_name in [
+            "saved_routes",
+            "get_saved_routes",
+            "load_routes",
+            "get_route_map",
+            "saved_channel_routes",
+            "channel_routes",
+        ]:
+            method = getattr(self, method_name, None)
+
+            if not method or not callable(method):
+                continue
+
+            try:
+                sig = inspect.signature(method)
+                params = list(sig.parameters)
+
+                if len(params) == 0:
+                    value = await method()
+                else:
+                    value = await method(guild)
+
+                if isinstance(value, dict) and value:
+                    return value
+            except Exception:
+                pass
+
+        cfg = await get_core_config(self.bot)
+
+        # Then try known config names.
+        names = [
+            "routes",
+            "channel_routes",
+            "route_map",
+            "routing",
+            "saved_routes",
+            "channel_map",
+            "route_settings",
+            "routes_map",
+            "route_data",
+        ]
+
+        for name in names:
+            try:
+                value = await getattr(cfg.guild(guild), name)()
+                if isinstance(value, dict) and value:
+                    return value
+            except Exception:
+                pass
+
+        try:
+            all_data = await cfg.guild(guild).all()
+        except Exception:
+            all_data = {}
+
+        for name in names:
+            value = all_data.get(name)
+            if isinstance(value, dict) and value:
+                return value
+
+        def value_channel_id(value):
+            if isinstance(value, dict):
+                return value.get("channel_id") or value.get("id")
+            return value
+
+        best = {}
+        best_score = 0
+
+        def score_dict(obj: dict) -> int:
+            score = 0
+
+            for key, value in obj.items():
+                key_text = str(key).lower()
+                channel_id = value_channel_id(value)
+
+                try:
+                    if guild.get_channel(int(channel_id)):
+                        score += 5
+                except Exception:
+                    pass
+
+                if any(word in key_text for word in [
+                    "billing",
+                    "support",
+                    "security",
+                    "development",
+                    "management",
+                    "observatory",
+                    "logs",
+                    "route",
+                    "channel",
+                    "ticket",
+                    "incident",
+                    "audit",
+                    "message",
+                    "member",
+                ]):
+                    score += 2
+
+            return score
+
+        def scan(obj):
+            nonlocal best, best_score
+
+            if not isinstance(obj, dict):
+                return
+
+            score = score_dict(obj)
+
+            if score > best_score and len(obj) >= 3:
+                best = obj
+                best_score = score
+
+            for value in obj.values():
+                if isinstance(value, dict):
+                    scan(value)
+
+        scan(all_data)
+
+        return best or {}
+
     async def doctor_route_audit(self, guild: discord.Guild) -> tuple[list[str], int, int]:
         lines = []
         failures = 0
         warnings = 0
 
         try:
-            cfg = await get_core_config(self.bot)
-            routes = await cfg.guild(guild).routes()
+            routes = await self.doctor_get_routes_map(guild)
             routes = routes or {}
 
             lines.append(f"Saved routes: `{len(routes)}`")
@@ -5853,8 +6104,21 @@ class MattisCore(commands.Cog):
 
         return lines, failures, warnings
 
+
     async def doctor_get_api_config_value(self, guild: discord.Guild, names: list[str]):
         cfg = await get_core_config(self.bot)
+
+        # Doctor-specific overrides first.
+        try:
+            doctor_settings = await cfg.guild(guild).doctor_settings()
+            doctor_settings = doctor_settings or {}
+
+            for name in names:
+                value = doctor_settings.get(name)
+                if value:
+                    return value
+        except Exception:
+            pass
 
         for name in names:
             try:
@@ -5866,14 +6130,43 @@ class MattisCore(commands.Cog):
 
         try:
             full = await cfg.guild(guild).all()
-            for name in names:
-                value = full.get(name)
-                if value:
-                    return value
         except Exception:
-            pass
+            full = {}
 
-        return None
+        for name in names:
+            value = full.get(name)
+            if value:
+                return value
+
+        # Recursive search through all config data.
+        wanted = {str(x).lower() for x in names}
+
+        def scan(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    key_l = str(key).lower()
+
+                    if key_l in wanted and value:
+                        return value
+
+                    if any(part in key_l for part in ["api", "backend", "base", "url", "endpoint"]) and isinstance(value, str):
+                        if value.startswith("http"):
+                            return value
+
+                    found = scan(value)
+                    if found:
+                        return found
+
+            if isinstance(obj, list):
+                for item in obj:
+                    found = scan(item)
+                    if found:
+                        return found
+
+            return None
+
+        return scan(full)
+
 
     async def doctor_api_audit(self, guild: discord.Guild) -> tuple[list[str], int, int]:
         lines = []
@@ -5882,42 +6175,50 @@ class MattisCore(commands.Cog):
 
         try:
             import aiohttp
-            import asyncio
 
             api_url = await self.doctor_get_api_config_value(guild, [
                 "api_url",
+                "api_base_url",
+                "base_api_url",
                 "base_url",
                 "mattis_api_url",
                 "backend_url",
+                "backend_base_url",
+                "api_endpoint",
+                "endpoint",
             ])
 
             api_token = await self.doctor_get_api_config_value(guild, [
                 "api_token",
                 "bot_token",
                 "mattis_token",
+                "mattis_api_token",
                 "token",
                 "api_key",
+                "secret",
             ])
 
             if not api_url:
-                failures += 1
-                lines.append("❌ API URL is not configured.")
-                return lines, failures, warnings
+                api_url = "https://api.mattisproductions.com"
+                warnings += 1
+                lines.append("⚠️ API URL not saved in bot config. Using default `https://api.mattisproductions.com`.")
 
             api_url = str(api_url).rstrip("/")
-            lines.append(f"✅ API URL configured: `{api_url}`")
+            lines.append(f"✅ API URL: `{api_url}`")
 
             if api_token:
-                lines.append("✅ API token configured: `yes`")
+                lines.append("✅ API token detected: `yes`")
             else:
                 warnings += 1
-                lines.append("⚠️ API token not detected in known config keys.")
+                lines.append("⚠️ API token not detected. Public health endpoints will still be tested.")
 
             endpoints = [
                 "/bot/status",
                 "/bot/command/overview",
-                "/status",
                 "/health",
+                "/status",
+                "/api/health",
+                "/",
             ]
 
             headers = {}
@@ -5925,7 +6226,8 @@ class MattisCore(commands.Cog):
             if api_token:
                 headers["Authorization"] = f"Bearer {api_token}"
 
-            success = False
+            passed = False
+            auth_seen = False
             tried = []
 
             timeout = aiohttp.ClientTimeout(total=8)
@@ -5941,25 +6243,30 @@ class MattisCore(commands.Cog):
                             sample = text[:120].replace("`", "'").replace("\n", " ")
 
                             if 200 <= resp.status < 300:
-                                lines.append(f"✅ API health OK: `{endpoint}` returned `{resp.status}`")
-                                success = True
+                                passed = True
+                                lines.append(f"✅ API endpoint passed: `{endpoint}` returned `{resp.status}`")
                                 break
 
                             if resp.status in [401, 403]:
-                                warnings += 1
-                                lines.append(f"⚠️ API endpoint `{endpoint}` responded `{resp.status}` — token/auth issue likely.")
-                            elif resp.status < 500:
-                                lines.append(f"ℹ️ API endpoint `{endpoint}` responded `{resp.status}`: `{sample}`")
+                                auth_seen = True
+                                lines.append(f"ℹ️ API endpoint `{endpoint}` returned `{resp.status}` auth-required.")
+                                continue
+
+                            if resp.status < 500:
+                                lines.append(f"ℹ️ API endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
                             else:
                                 warnings += 1
-                                lines.append(f"⚠️ API endpoint `{endpoint}` responded `{resp.status}`: `{sample}`")
+                                lines.append(f"⚠️ API endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
 
                     except Exception as exc:
                         lines.append(f"ℹ️ API endpoint `{endpoint}` failed: `{type(exc).__name__}`")
 
-            if not success:
+            if not passed:
                 failures += 1
-                lines.append(f"❌ No API health endpoint passed. Tried: `{', '.join(tried)}`")
+                if auth_seen:
+                    lines.append("❌ API is reachable but no health endpoint passed without valid auth.")
+                else:
+                    lines.append(f"❌ No API health endpoint passed. Tried: `{', '.join(tried)}`")
 
         except Exception as exc:
             failures += 1
@@ -6010,6 +6317,39 @@ class MattisCore(commands.Cog):
             color = discord.Color.green()
 
         await self.send_paginated(ctx, title, summary + sections, color=color)
+
+
+    @doctor.command(name="setapi")
+    async def doctor_setapi(self, ctx, api_url: str):
+        """Set the API URL used by doctor readiness checks."""
+        if not await require_admin(ctx):
+            return
+
+        if not api_url.startswith("http://") and not api_url.startswith("https://"):
+            await ctx.send(embed=error_embed("Invalid API URL", "Use a full URL starting with http:// or https://"))
+            return
+
+        cfg = await get_core_config(self.bot)
+        data = await cfg.guild(ctx.guild).doctor_settings()
+        data = data or {}
+        data["api_url"] = api_url.rstrip("/")
+        await cfg.guild(ctx.guild).doctor_settings.set(data)
+
+        await ctx.send(embed=ok_embed("Doctor API URL saved", f"Doctor will test `{data['api_url']}`."))
+
+    @doctor.command(name="clearapi")
+    async def doctor_clearapi(self, ctx):
+        """Clear the doctor API URL override."""
+        if not await require_admin(ctx):
+            return
+
+        cfg = await get_core_config(self.bot)
+        data = await cfg.guild(ctx.guild).doctor_settings()
+        data = data or {}
+        data.pop("api_url", None)
+        await cfg.guild(ctx.guild).doctor_settings.set(data)
+
+        await ctx.send(embed=ok_embed("Doctor API URL cleared", "Doctor will use detected/default API URL."))
 
     @doctor.command(name="api")
     async def doctor_api(self, ctx):

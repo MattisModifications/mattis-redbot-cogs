@@ -35,6 +35,7 @@ async def get_core_config(bot) -> Config:
         notify_settings={},
         eventlog_settings={},
         capabilities={},
+        doctor_settings={},
     )
     return cfg
 
@@ -904,12 +905,12 @@ async def require_security_support(ctx) -> bool:
     )
 
 
+
 async def require_backend_access(ctx) -> bool:
     return await require_capability(
         ctx,
         "backend_access",
-        "infrastructure_admin",
-        label="backend_access, infrastructure_admin",
+        label="backend_access",
     )
 
 
@@ -920,10 +921,8 @@ async def require_system_status(ctx) -> bool:
         "development_read",
         "production_access",
         "infrastructure_admin",
-        "management_view",
-        label="technical_support, development_read, production_access, infrastructure_admin, management_view",
+        label="technical_support, development_read, production_access, infrastructure_admin",
     )
-
 
 async def require_discord_systems(ctx) -> bool:
     return await require_capability(
