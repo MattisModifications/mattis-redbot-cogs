@@ -2325,6 +2325,8 @@ class MattisCore(commands.Cog):
         ))
 
     @alerts.command(name="ops")
+
+
     async def alerts_ops(self, ctx):
         """Show active alerts using the Operations Alert Intelligence view."""
         if not await require_admin(ctx):
@@ -2352,13 +2354,13 @@ class MattisCore(commands.Cog):
             action = item.get("recommended_action", "Review the routed logs and confirm whether action is required.")
 
             lines.extend([
-                f"**{title}**",
+                f"**{str(title)[:120]}**",
                 f"Status: `{status}` | Severity: `{severity}` | Count: `{count}`",
                 f"Area: `{area}` | Subsystem: `{subsystem}`",
                 f"Owner: `{owner}` | Route: `{route}`",
                 f"Posts: `{post_count}` | Suppressed duplicates: `{suppressed}`",
                 f"Action: {action}",
-                f"Show: `!mcore alerts show {str(alert_id)[:40]}`",
+                f"Show: `!mcore alerts show {str(alert_id)[:60]}`",
                 "",
             ])
 
@@ -7088,226 +7090,93 @@ class MattisCore(commands.Cog):
 
 
 
+
+
     def b3a_clean_alert_text(self, value: str) -> str:
+        import re
+
         value = str(value or "")
         value = value.replace("`", "'")
-        value = re.sub(r"\b[A-Za-z0-9_\-]{40,}\b", "<redacted>", value)
+        value = value.replace("<Redacted>", "").replace("<redacted>", "")
+
+        # Keep lifecycle/rule IDs readable. Only redact obvious secret-looking tokens.
+        value = re.sub(r"\b(sk_live|sk_test|pk_live|pk_test|xoxb|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_\-]{10,}\b", "<secret>", value)
+        value = re.sub(r"\b[A-Za-z0-9+/]{80,}={0,2}\b", "<secret>", value)
         value = re.sub(r"\s+", " ", value).strip()
+
         return value
 
+
     def b3a_extract_path(self, text: str) -> str:
+        import re
+
         text = str(text or "")
 
-        patterns = [
-            r"_path_([a-zA-Z0-9_]+)",
-            r"path[:=\s]+#?([a-zA-Z0-9_\-]+)",
+        # Handles: _path_bot_audit_highrisk_purpose_audit_log
+        m = re.search(r"_path_([a-zA-Z0-9_]+?)(?:_purpose_|:hash:|$)", text, re.I)
+        if m:
+            return m.group(1).replace("_", "-")
+
+        for pat in [
             r"route[:=\s]+#?([a-zA-Z0-9_\-]+)",
             r"channel[:=\s]+#?([a-zA-Z0-9_\-]+)",
-        ]
-
-        for pat in patterns:
+            r"path[:=\s]+#?([a-zA-Z0-9_\-]+)",
+        ]:
             m = re.search(pat, text, re.I)
             if m:
                 return m.group(1).replace("_", "-")
 
         return ""
 
-    def b3a_human_rule_name(self, raw: str) -> str:
-        raw = str(raw or "").strip()
 
-        if not raw:
-            return "Mattis CMS Alert"
+    def b3a_human_rule_name(self, raw: str) -> str:
+        import re
+
+        raw = str(raw or "")
+        low = raw.lower()
+
+        known = [
+            ("support_critical", "Critical Support Tickets"),
+            ("support_unassigned", "Unassigned Support Tickets"),
+            ("billing_failed", "Failed Billing / Failed Invoices"),
+            ("billing_pastdue", "Past Due Billing"),
+            ("audit_highrisk", "High Risk Audit Events"),
+            ("high_risk_audit_events", "High Risk Audit Events"),
+            ("bot_audit_highrisk", "High Risk Audit Events"),
+            ("observatory_logs_audit_log", "High Risk Audit Events"),
+            ("security_risks", "Security Risk Events"),
+            ("security_suspicious", "Suspicious Security Activity"),
+            ("automation_failed", "Automation Failures"),
+            ("discord_broken", "Discord Integration Issues"),
+            ("roblox_broken", "Roblox Integration Issues"),
+            ("incidents", "Active Incidents"),
+            ("api_down", "API Availability Issue"),
+            ("api_errors", "API Error Spike"),
+            ("web_down", "Website Availability Issue"),
+            ("postgres", "Postgres Database Issue"),
+            ("redis", "Redis Cache / Session Issue"),
+        ]
+
+        for key, title in known:
+            if key in low:
+                return title
 
         text = raw
         text = re.sub(r"^title_", "", text, flags=re.I)
         text = re.sub(r":hash:[a-f0-9]+$", "", text, flags=re.I)
         text = re.sub(r"_path_.*$", "", text, flags=re.I)
         text = re.sub(r"_purpose_.*$", "", text, flags=re.I)
-
-        known = {
-            "high_risk_audit_events": "High Risk Audit Events",
-            "audit_highrisk": "High Risk Audit Events",
-            "failed_invoices": "Failed Invoices",
-            "past_due_invoices": "Past Due Invoices",
-            "chargebacks": "Chargebacks",
-            "payment_failures": "Payment Failures",
-            "security_events": "Security Events",
-            "suspicious_sessions": "Suspicious Sessions",
-            "account_compromise": "Account Compromise Risk",
-            "critical_incidents": "Critical Incidents",
-            "api_down": "API Down",
-            "api_errors": "API Errors",
-            "web_down": "Website Down",
-            "bot_errors": "Discord Bot Errors",
-            "support_unassigned": "Unassigned Support Tickets",
-            "support_critical": "Critical Support Tickets",
-            "database_errors": "Database Errors",
-            "postgres_errors": "Postgres Errors",
-            "redis_errors": "Redis Errors",
-            "release_failed": "Release Failure",
-            "deployment_failed": "Deployment Failure",
-            "roblox_errors": "Roblox Integration Errors",
-        }
-
-        lowered = text.lower()
-
-        for key, title in known.items():
-            if key in lowered:
-                return title
-
         text = text.replace("_", " ").replace("-", " ")
         text = re.sub(r"\s+", " ", text).strip()
 
         if not text:
             return "Mattis CMS Alert"
 
-        return text.title()
+        return text.title()[:120]
+
 
     def b3a_classify_alert(self, raw: str, count: int = 0) -> dict:
-        text = str(raw or "").lower()
-
-        data = {
-            "area": "Mattis CMS | Systems",
-            "subsystem": "General Operations",
-            "owner": "Management",
-            "escalation": "Management → Founder",
-            "customer_impact": "No direct customer impact detected from this alert alone.",
-            "internal_impact": "Internal review may be required.",
-            "severity": "low",
-            "severity_reason": "Low severity because no critical keywords, major thresholds, or direct service impact were detected.",
-            "why_it_matters": "This alert may indicate something that needs review inside Mattis CMS | Systems.",
-            "recommended_action": "Review the routed channel/logs and confirm whether action is required.",
-            "related_commands": [
-                "!mcore alerts active",
-                "!mcore doctor",
-            ],
-        }
-
-        def set_base(area, subsystem, owner, escalation):
-            data["area"] = area
-            data["subsystem"] = subsystem
-            data["owner"] = owner
-            data["escalation"] = escalation
-
-        if any(x in text for x in ["audit", "highrisk", "high_risk", "high risk"]):
-            set_base("Audit / Security", "High-Risk Audit Trail", "Audit Reviewer + Security Admin", "Audit Reviewer → Security Admin → Incident Response → Founder")
-            data["internal_impact"] = "Sensitive staff/system activity requires review."
-            data["customer_impact"] = "No direct customer impact detected yet, unless the audit events relate to customer accounts or billing."
-            data["why_it_matters"] = "High-risk audit events can indicate sensitive staff actions, permission changes, system configuration changes, or unusual internal activity."
-            data["recommended_action"] = "Open the high-risk audit log route, review the newest events, confirm whether they are expected, and escalate anything unauthorised."
-            data["related_commands"] = [
-                "!mcore alerts active",
-                "!mcore alerts investigate <alert_id>",
-                "!mcore doctor capabilities",
-                "!mcore access matrix",
-            ]
-
-        elif any(x in text for x in ["billing", "invoice", "payment", "stripe", "refund", "chargeback", "past_due"]):
-            set_base("Billing", "Payments / Customer Billing", "Billing Support", "Billing Support → Director → Founder")
-            data["customer_impact"] = "Potential customer billing/payment impact."
-            data["internal_impact"] = "Billing staff may need to review customer accounts, invoices, or failed payments."
-            data["why_it_matters"] = "Billing alerts can affect customer access, revenue collection, invoices, refunds, disputes, or account status."
-            data["recommended_action"] = "Review the billing route, check affected invoices/customers, and contact or escalate where needed."
-            data["related_commands"] = [
-                "!mcore alerts active",
-                "!mcore billing status",
-                "!mcore doctor api",
-            ]
-            if "chargeback" in text:
-                data["owner"] = "Billing Support + Management"
-                data["escalation"] = "Billing Support → Director → Founder"
-                data["recommended_action"] = "Review the chargeback, preserve evidence, check customer account state, and escalate to management."
-
-        elif any(x in text for x in ["security", "exploit", "compromise", "suspicious", "risk", "unauthorised", "unauthorized"]):
-            set_base("Security", "Security Monitoring", "Security Support + Security Admin", "Security Support → Security Admin → Incident Response → Founder")
-            data["customer_impact"] = "Possible customer impact if accounts, sessions, or production systems are involved."
-            data["internal_impact"] = "Security staff must verify whether this is legitimate or suspicious activity."
-            data["why_it_matters"] = "Security alerts can indicate suspicious behaviour, compromised accounts, abuse, exploit attempts, or permission misuse."
-            data["recommended_action"] = "Investigate the source, affected target, account/session context, and escalate if suspicious."
-
-        elif any(x in text for x in ["support", "ticket"]):
-            set_base("Support", "Support Tickets", "Support Lead", "Support Agent → Support Lead → Management")
-            data["customer_impact"] = "Customers may be waiting for help or escalation."
-            data["internal_impact"] = "Support team workload or response times may require attention."
-            data["why_it_matters"] = "Unassigned or critical support tickets can cause poor customer experience if ignored."
-            data["recommended_action"] = "Open the support route, assign ownership, and escalate urgent tickets."
-
-        elif any(x in text for x in ["api", "backend"]):
-            set_base("API / Backend", "Mattis API", "Lead Developer + Infrastructure Admin", "Infrastructure Admin → Lead Developer → Founder")
-            data["customer_impact"] = "Potential customer impact if login, dashboard, billing, or CMS actions depend on this API."
-            data["internal_impact"] = "Internal tools, bot checks, or automation may fail."
-            data["why_it_matters"] = "The API is a core dependency for Mattis CMS. API problems can break website features, bot integrations, billing flows, or customer actions."
-            data["recommended_action"] = "Check API health, systemd status, Nginx upstream, API logs, and recent deployments."
-            data["related_commands"] = [
-                "!mcore doctor api",
-                "!mcore doctor",
-                "!mcore alerts investigate <alert_id>",
-            ]
-
-        elif any(x in text for x in ["web", "frontend", "website", "site"]):
-            set_base("Web / Frontend", "Public Website / Dashboard", "Lead Developer", "Lead Developer → Infrastructure Admin → Founder")
-            data["customer_impact"] = "Potential customer impact if the website or dashboard is unavailable."
-            data["internal_impact"] = "Staff/customer access to frontend pages may be affected."
-            data["why_it_matters"] = "Website/frontend issues can block customer access, onboarding, dashboard usage, or marketing pages."
-            data["recommended_action"] = "Check Nginx, frontend service, SSL, public route availability, and web logs."
-
-        elif any(x in text for x in ["postgres", "database", "db"]):
-            set_base("Database", "Postgres", "Infrastructure Admin", "Infrastructure Admin → Founder")
-            data["customer_impact"] = "High customer impact possible if database reads/writes are affected."
-            data["internal_impact"] = "API, billing, support, sessions, and dashboard features may fail."
-            data["why_it_matters"] = "Postgres is a core data dependency. Database issues can cause outages, data write failures, login problems, or billing/support failures."
-            data["recommended_action"] = "Check Postgres service, disk usage, connection counts, database logs, and latest backup status."
-
-        elif "redis" in text:
-            set_base("Redis", "Cache / Sessions", "Infrastructure Admin", "Infrastructure Admin → Lead Developer → Founder")
-            data["customer_impact"] = "Possible login/session/cache impact."
-            data["internal_impact"] = "API or dashboard performance and session behaviour may be affected."
-            data["why_it_matters"] = "Redis commonly supports cache/session behaviour. Failures can affect performance or authenticated sessions."
-            data["recommended_action"] = "Check Redis service, memory usage, connection errors, and dependent API logs."
-
-        elif any(x in text for x in ["bot", "discord"]):
-            set_base("Discord Bot", "Redbot / Discord Operations", "Infrastructure Admin + Lead Developer", "Infrastructure Admin → Lead Developer → Founder")
-            data["customer_impact"] = "Usually internal impact unless customers rely on Discord workflows."
-            data["internal_impact"] = "Staff commands, support flows, alerts, logs, or automations may be affected."
-            data["why_it_matters"] = "The Discord bot runs internal operations, routing, alerts, permissions, and staff workflows."
-            data["recommended_action"] = "Check Redbot process, loaded cogs, command errors, Discord permissions, and recent reloads."
-
-        elif any(x in text for x in ["release", "deployment", "deploy"]):
-            set_base("Release", "Deployment / Release Management", "Release Manager + Lead Developer", "Release Manager → Lead Developer → Founder")
-            data["customer_impact"] = "Potential customer impact if production release affected live services."
-            data["internal_impact"] = "Development/release workflow requires review before continuing."
-            data["why_it_matters"] = "Release/deployment issues can introduce downtime, regressions, or failed production updates."
-            data["recommended_action"] = "Review deployment output, release notes, QA status, rollback readiness, and doctor status."
-
-        elif "roblox" in text:
-            set_base("Roblox Integration", "Roblox OAuth / Marketplace / Sync", "Roblox Systems + Developer", "Developer → Lead Developer → Founder")
-            data["customer_impact"] = "Possible customer impact for Roblox-linked CMS features."
-            data["internal_impact"] = "Roblox integration workflows may need review."
-            data["why_it_matters"] = "Roblox integration issues can affect customer verification, marketplace flows, or CMS sync features."
-            data["recommended_action"] = "Check Roblox API configuration, OAuth keys, webhook signing, and related API logs."
-
-        # Severity logic
-        if any(x in text for x in ["critical", "outage", "service down", "data loss", "compromise", "unauthorised", "unauthorized", "chargeback"]):
-            data["severity"] = "critical"
-            data["severity_reason"] = "Critical severity because the alert suggests outage, security/data risk, chargeback, or unauthorised activity."
-
-        elif any(x in text for x in ["high risk", "high_risk", "highrisk", "security", "exploit", "api down", "failed invoice"]):
-            data["severity"] = "high"
-            data["severity_reason"] = "High severity because the alert is security-sensitive, high-risk, API-impacting, or billing-impacting."
-
-        elif count >= 20:
-            data["severity"] = "high"
-            data["severity_reason"] = f"High severity because the count is {count}, which is above the high-volume review threshold."
-
-        elif count >= 5:
-            data["severity"] = "medium"
-            data["severity_reason"] = f"Medium severity because the count is {count}, which is above normal low-volume noise."
-
-        elif any(x in text for x in ["warning", "warn", "past due", "unassigned"]):
-            data["severity"] = "medium"
-            data["severity_reason"] = "Medium severity because this alert indicates a warning, pending action, or unassigned work."
-
-        return data
+        return self.b3a_alert_profile(raw, count)
 
     def b3a_extract_count(self, raw: str, existing=None) -> int:
         raw = str(raw or "")
@@ -7392,23 +7261,28 @@ class MattisCore(commands.Cog):
         return "\n".join(changes[:6])
 
 
+
+
     async def b3a_enrich_existing_alert_item(self, guild, alert_id: str, item: dict) -> dict:
-        """Rebuild missing Operations Alert Intelligence fields from old/raw lifecycle state."""
+        """Rebuild Operations Alert Intelligence from the stable alert key, ignoring bad old generated titles."""
         item = item or {}
-        raw = " ".join([
+
+        # IMPORTANT: old B3A accidentally saved giant redacted generated titles.
+        # Do not feed those titles back into classification.
+        safe_raw = " ".join([
             str(alert_id or ""),
             str(item.get("identity") or ""),
-            str(item.get("rule") or ""),
-            str(item.get("title") or ""),
+            str(item.get("rule_id") or ""),
             str(item.get("raw_reference") or ""),
+            str(item.get("investigation_route") or ""),
             str(item.get("route") or ""),
         ])
 
         meta = await self.b3a_build_alert_intelligence(
             guild,
             embed=None,
-            content=raw,
-            identity=alert_id or item.get("identity") or item.get("rule") or "unknown",
+            content=safe_raw,
+            identity=alert_id or item.get("identity") or item.get("rule_id") or "unknown",
             fingerprint=item.get("fingerprint", ""),
             existing=item,
             status=item.get("status") or "ongoing",
@@ -7417,7 +7291,6 @@ class MattisCore(commands.Cog):
         merged = dict(item)
         merged.update(meta)
 
-        # Preserve existing lifecycle stats.
         for key in [
             "first_seen",
             "last_seen",
@@ -7433,17 +7306,9 @@ class MattisCore(commands.Cog):
             if item.get(key) is not None:
                 merged[key] = item.get(key)
 
-        if not merged.get("identity"):
-            merged["identity"] = alert_id
-
-        if not merged.get("alert_id") or merged.get("alert_id") == "unknown":
-            merged["alert_id"] = alert_id
-
-        if not merged.get("rule_id") or merged.get("rule_id") == "unknown":
-            merged["rule_id"] = alert_id
-
-        if not merged.get("title") or str(merged.get("title")).lower() in {"unknown", "none"}:
-            merged["title"] = self.b3a_human_rule_name(alert_id)
+        merged["alert_id"] = alert_id
+        merged["rule_id"] = alert_id
+        merged["identity"] = item.get("identity") or alert_id
 
         return merged
 
@@ -7496,13 +7361,20 @@ class MattisCore(commands.Cog):
 
         return changed, new_state
 
+
+
     async def b3a_build_alert_intelligence(self, guild, embed=None, content=None, identity=None, fingerprint=None, existing=None, status=None) -> dict:
         existing = existing or {}
 
         raw_parts = [
             str(identity or ""),
             str(content or ""),
-            str(existing.get("title") or ""),
+            str(existing.get("identity") or ""),
+            str(existing.get("rule_id") or ""),
+            str(existing.get("alert_id") or ""),
+            str(existing.get("raw_reference") or ""),
+            str(existing.get("investigation_route") or ""),
+            str(existing.get("route") or ""),
         ]
 
         if embed is not None:
@@ -7514,14 +7386,12 @@ class MattisCore(commands.Cog):
                     raw_parts.append(str(getattr(field, "name", "") or ""))
                     raw_parts.append(str(getattr(field, "value", "") or ""))
             except Exception:
-                raw_parts.append(repr(embed))
+                pass
 
-        raw = " ".join(raw_parts)
-        raw = self.b3a_clean_alert_text(raw)
-
+        raw = self.b3a_clean_alert_text(" ".join(raw_parts))
         count = self.b3a_extract_count(raw, existing)
-        title = self.b3a_human_rule_name(raw)
-        classification = self.b3a_classify_alert(raw, count)
+
+        profile = self.b3a_alert_profile(raw, count)
 
         path = self.b3a_extract_path(raw)
         route = "Unknown"
@@ -7537,33 +7407,37 @@ class MattisCore(commands.Cog):
         if route == "Unknown" and path:
             route = "#" + path
 
+        # Known route correction for current audit alert.
+        if route == "Unknown" and any(x in raw.lower() for x in ["audit_highrisk", "high_risk_audit_events", "bot_audit_highrisk", "observatory_logs_audit_log"]):
+            route = "#observatory-logs-audit-log / #bot-audit-highrisk"
+
         status = status or existing.get("status") or "new"
 
         meta = {
-            "alert_id": identity or "unknown",
-            "fingerprint": fingerprint or "",
-            "rule_id": str(identity or "unknown").replace("`", "'"),
-            "title": title,
-            "plain_summary": f"{title} detected in {classification['area']}.",
-            "detailed_summary": f"The system detected `{count}` matching item(s) for this alert rule.",
+            "alert_id": identity or existing.get("alert_id") or "unknown",
+            "fingerprint": fingerprint or existing.get("fingerprint") or "",
+            "rule_id": identity or existing.get("rule_id") or "unknown",
+            "title": profile["title"],
+            "plain_summary": f"{profile['title']} detected. `{count}` matching item(s) are currently active.",
+            "detailed_summary": f"The Mattis alert engine detected `{count}` active item(s) matching this rule. This is tracked through the alert lifecycle so repeated unchanged checks are suppressed instead of spammed.",
             "status": status,
-            "severity": classification["severity"],
-            "severity_reason": classification["severity_reason"],
-            "area": classification["area"],
-            "subsystem": classification["subsystem"],
-            "owner": classification["owner"],
-            "escalation": classification["escalation"],
-            "customer_impact": classification["customer_impact"],
-            "internal_impact": classification["internal_impact"],
+            "severity": profile["severity"],
+            "severity_reason": profile["severity_reason"],
+            "area": profile["area"],
+            "subsystem": profile["subsystem"],
+            "owner": profile["owner"],
+            "escalation": profile["escalation"],
+            "customer_impact": profile["customer_impact"],
+            "internal_impact": profile["internal_impact"],
             "count": count,
-            "threshold": "20 = high-volume review, 5 = medium-volume review, critical keywords override thresholds.",
-            "trend": "New alert." if not existing else "Repeated/ongoing alert.",
-            "why_it_matters": classification["why_it_matters"],
-            "recommended_action": classification["recommended_action"],
+            "threshold": "Critical keywords override count. Count ≥ 20 = high-volume review. Count ≥ 5 = medium/high review depending on alert type.",
+            "trend": "New alert." if not existing else "Ongoing alert. Duplicate unchanged posts are being suppressed.",
+            "why_it_matters": profile["why_it_matters"],
+            "recommended_action": profile["recommended_action"],
             "investigation_route": route,
-            "related_commands": classification["related_commands"],
-            "source": "Mattis CMS | Systems alert lifecycle",
-            "raw_reference": str(identity or "")[:220],
+            "related_commands": profile["related_commands"],
+            "source": "Mattis CMS | Systems alert engine",
+            "raw_reference": str(identity or existing.get("rule_id") or "")[:220],
             "post_count": int(existing.get("post_count", 0)),
             "suppressed_count": int(existing.get("suppressed_count", 0)),
             "last_change": "",
@@ -7571,21 +7445,9 @@ class MattisCore(commands.Cog):
 
         if existing:
             meta["last_change"] = self.b3a_change_summary(existing, meta)
-            old_count = existing.get("count")
-
-            try:
-                if old_count is not None:
-                    old_count_i = int(old_count)
-                    if count > old_count_i:
-                        meta["trend"] = f"Increasing: count rose from {old_count_i} to {count}."
-                    elif count < old_count_i:
-                        meta["trend"] = f"Decreasing: count dropped from {old_count_i} to {count}."
-                    else:
-                        meta["trend"] = "Stable: count unchanged since last posted update."
-            except Exception:
-                pass
 
         return meta
+
 
     async def b3a_render_alert_embed(self, guild, embed=None, content=None, meta=None):
         import discord
@@ -7594,24 +7456,28 @@ class MattisCore(commands.Cog):
 
         icon = self.b3a_alert_icon(meta.get("severity"), meta.get("status"))
         title = f"{icon} {meta.get('title', 'Mattis CMS Alert')}"
+        title = title[:250]
 
         description = (
-            f"**What happened:** {meta.get('plain_summary')}\n"
-            f"**Why it matters:** {meta.get('why_it_matters')}\n"
-            f"**Recommended next action:** {meta.get('recommended_action')}"
-        )
+            f"**What happened:** {meta.get('plain_summary', 'Unknown')}\n\n"
+            f"**Why it matters:** {meta.get('why_it_matters', 'Unknown')}\n\n"
+            f"**Recommended next action:** {meta.get('recommended_action', 'Unknown')}"
+        )[:3900]
 
-        new_embed = discord.Embed(title=title, description=description[:3900])
+        new_embed = discord.Embed(title=title, description=description)
 
         try:
-            if str(meta.get("severity", "")).lower() == "critical":
-                new_embed.colour = discord.Colour.red()
-            elif str(meta.get("severity", "")).lower() == "high":
-                new_embed.colour = discord.Colour.orange()
-            elif str(meta.get("severity", "")).lower() == "medium":
-                new_embed.colour = discord.Colour.gold()
-            elif str(meta.get("status", "")).lower() == "resolved":
+            sev = str(meta.get("severity", "")).lower()
+            status = str(meta.get("status", "")).lower()
+
+            if status == "resolved":
                 new_embed.colour = discord.Colour.green()
+            elif sev == "critical":
+                new_embed.colour = discord.Colour.red()
+            elif sev == "high":
+                new_embed.colour = discord.Colour.orange()
+            elif sev == "medium":
+                new_embed.colour = discord.Colour.gold()
             else:
                 new_embed.colour = discord.Colour.blue()
         except Exception:
@@ -7619,9 +7485,11 @@ class MattisCore(commands.Cog):
 
         def add(name, value, inline=False):
             value = self.b3a_clean_alert_text(value)
-            if not value:
+
+            if not value or value.lower() == "none":
                 value = "Unknown"
-            new_embed.add_field(name=name, value=value[:1024], inline=inline)
+
+            new_embed.add_field(name=name, value=str(value)[:1024], inline=inline)
 
         add("Status", self.b3a_status_label(meta.get("status")), True)
         add("Severity", str(meta.get("severity", "unknown")).title(), True)
@@ -7638,14 +7506,10 @@ class MattisCore(commands.Cog):
 
         add("Investigation Route", meta.get("investigation_route"), True)
         add("Trend", meta.get("trend"), True)
-        add("Threshold Logic", meta.get("threshold"), False)
-
-        if meta.get("last_change"):
-            add("Changed Since Last Post", meta.get("last_change"), False)
 
         related = meta.get("related_commands") or []
         if related:
-            add("Related Commands", "\n".join(f"`{x}`" for x in related[:6]), False)
+            add("Related Commands", "\n".join(f"`{x}`" for x in related[:8]), False)
 
         lifecycle = (
             f"Posts: `{meta.get('post_count', 0)}`\n"
