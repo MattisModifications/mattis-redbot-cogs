@@ -5221,6 +5221,189 @@ class MattisCore(commands.Cog):
 
         return lines
 
+
+    def b4c_parse_time(self, value):
+        from datetime import datetime, timezone
+
+        if not value:
+            return None
+
+        try:
+            value = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(value)
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            return dt
+        except Exception:
+            return None
+
+    def b4c_now(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
+
+    def b4c_sort_events(self, events: list[dict], newest_first: bool = True) -> list[dict]:
+        def key(event):
+            c = self.b4a_classify_log_event(event)
+            dt = self.b4c_parse_time(c.get("createdAt"))
+            return dt or self.b4c_parse_time("1970-01-01T00:00:00+00:00")
+
+        return sorted(events, key=key, reverse=newest_first)
+
+    def b4c_minutes_ago(self, event: dict) -> int:
+        c = self.b4a_classify_log_event(event)
+        dt = self.b4c_parse_time(c.get("createdAt"))
+
+        if not dt:
+            return -1
+
+        delta = self.b4c_now() - dt
+        return max(0, int(delta.total_seconds() // 60))
+
+    def b4c_timeline_lines(self, events: list[dict], limit: int = 25) -> list[str]:
+        events = self.b4c_sort_events(events, newest_first=True)
+
+        lines = []
+
+        for event in events[:limit]:
+            c = self.b4a_classify_log_event(event)
+            minutes = self.b4c_minutes_ago(event)
+
+            age = f"{minutes} min ago" if minutes >= 0 else "age unknown"
+
+            emoji = "🚨" if c["severity"] == "critical" else "⚠️" if c["severity"] == "high" else "🟡" if c["severity"] == "medium" else "ℹ️"
+
+            lines.append(
+                f"{emoji} `{c['createdAt']}` — `{c['actor']}` — `{c['action']}` — **{c['category']}** — {c['reason']} _({age})_"
+            )
+
+        return lines
+
+    def b4c_related_score(self, base: dict, other: dict) -> int:
+        b = self.b4a_classify_log_event(base)
+        o = self.b4a_classify_log_event(other)
+
+        score = 0
+
+        if b["actor"] != "Unknown" and b["actor"] == o["actor"]:
+            score += 5
+
+        if b["action"] != "Unknown" and b["action"] == o["action"]:
+            score += 3
+
+        if b["category"] == o["category"]:
+            score += 3
+
+        if b["risk"] == o["risk"]:
+            score += 1
+
+        reason_words = set(str(b["reason"]).lower().replace(".", " ").replace("_", " ").split())
+        other_words = set(str(o["reason"]).lower().replace(".", " ").replace("_", " ").split())
+        shared = reason_words.intersection(other_words)
+
+        score += min(len(shared), 5)
+
+        bt = self.b4c_parse_time(b["createdAt"])
+        ot = self.b4c_parse_time(o["createdAt"])
+
+        if bt and ot:
+            minutes = abs(int((bt - ot).total_seconds() // 60))
+
+            if minutes <= 15:
+                score += 5
+            elif minutes <= 60:
+                score += 3
+            elif minutes <= 240:
+                score += 1
+
+        return score
+
+    def b4c_cluster_events(self, events: list[dict]) -> list[dict]:
+        classified = [self.b4a_classify_log_event(e) for e in events]
+
+        clusters = {}
+
+        for event, c in zip(events, classified):
+            key = f"{c['actor']}|{c['category']}|{c['action']}"
+            bucket = clusters.setdefault(key, {
+                "actor": c["actor"],
+                "category": c["category"],
+                "action": c["action"],
+                "risk": c["risk"],
+                "severity": c["severity"],
+                "events": [],
+                "reasons": {},
+                "newest": c["createdAt"],
+            })
+
+            bucket["events"].append(event)
+            bucket["reasons"][c["reason"]] = bucket["reasons"].get(c["reason"], 0) + 1
+
+            if str(c["createdAt"]) > str(bucket["newest"]):
+                bucket["newest"] = c["createdAt"]
+
+            if c["severity"] == "critical":
+                bucket["severity"] = "critical"
+            elif c["severity"] == "high" and bucket["severity"] != "critical":
+                bucket["severity"] = "high"
+            elif c["severity"] == "medium" and bucket["severity"] not in ["critical", "high"]:
+                bucket["severity"] = "medium"
+
+        results = list(clusters.values())
+        results.sort(key=lambda x: (len(x["events"]), str(x["newest"])), reverse=True)
+        return results
+
+    def b4c_suspicion_score(self, event: dict) -> tuple[int, list[str]]:
+        c = self.b4a_classify_log_event(event)
+        reason = str(c["reason"]).lower()
+        action = str(c["action"]).lower()
+
+        score = 0
+        flags = []
+
+        if c["severity"] in ["critical", "high"]:
+            score += 3
+            flags.append("high-risk severity")
+
+        if any(x in reason for x in ["secret", "token", "key", "webhook"]):
+            score += 5
+            flags.append("secret/token/webhook related")
+
+        if any(x in reason for x in ["stripe", "billing", "invoice"]):
+            score += 4
+            flags.append("billing/Stripe related")
+
+        if "roblox" in reason:
+            score += 3
+            flags.append("Roblox integration related")
+
+        if any(x in reason for x in ["permission", "role", "access", "capability"]):
+            score += 4
+            flags.append("access/permission related")
+
+        if "platform.setting.updated" in action or "setting.updated" in action:
+            score += 2
+            flags.append("platform setting update")
+
+        if c["actor"] == "Unknown":
+            score += 2
+            flags.append("unknown actor")
+
+        return score, flags
+
+    def b4c_suspicious_events(self, events: list[dict]) -> list[tuple[dict, int, list[str]]]:
+        ranked = []
+
+        for event in events:
+            score, flags = self.b4c_suspicion_score(event)
+
+            if score >= 5:
+                ranked.append((event, score, flags))
+
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        return ranked
+
     @mcore.group(name="logs", invoke_without_command=True)
 
     async def logs(self, ctx):
@@ -5252,6 +5435,246 @@ class MattisCore(commands.Cog):
         await self.send_paginated(ctx, "Mattis Logs", lines)
 
 
+
+
+    @logs.command(name="timeline")
+    async def logs_timeline(self, ctx, limit: int = 25):
+        """Show high-risk audit events as a timeline."""
+        if not await require_admin(ctx):
+            return
+
+        limit = max(5, min(int(limit or 25), 50))
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        if not events:
+            await ctx.send(embed=info_embed("Audit Timeline", "No high-risk audit events returned by the API."))
+            return
+
+        lines = [
+            f"Endpoint: `{data.get('endpoint')}`",
+            f"API: `HTTP {data.get('status')}`",
+            f"Events returned: `{len(events)}`",
+            f"Showing: `{min(limit, len(events))}`",
+            "",
+        ]
+
+        lines.extend(self.b4c_timeline_lines(events, limit=limit))
+
+        await self.send_paginated(ctx, "High-Risk Audit Timeline", lines)
+
+    @logs.command(name="window")
+    async def logs_window(self, ctx, minutes: int = 60):
+        """Show high-risk audit events from the last X minutes."""
+        if not await require_admin(ctx):
+            return
+
+        minutes = max(1, min(int(minutes or 60), 10080))
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        matches = []
+
+        for event in events:
+            age = self.b4c_minutes_ago(event)
+
+            if age >= 0 and age <= minutes:
+                matches.append(event)
+
+        if not matches:
+            await ctx.send(embed=info_embed("Audit Time Window", f"No high-risk audit events found in the last `{minutes}` minutes."))
+            return
+
+        lines = [
+            f"Window: last `{minutes}` minutes",
+            f"Matching events: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4c_timeline_lines(matches, limit=50))
+
+        await self.send_paginated(ctx, "Audit Time Window", lines)
+
+    @logs.command(name="actor-timeline")
+    async def logs_actor_timeline(self, ctx, *, actor: str):
+        """Show timeline for one actor/user ID."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        actor_l = str(actor or "").lower().strip()
+
+        matches = [
+            event for event in events
+            if actor_l in self.b4a_log_event_actor(event).lower()
+        ]
+
+        if not matches:
+            await ctx.send(embed=info_embed("Actor Timeline", f"No high-risk audit timeline events found for `{actor}`."))
+            return
+
+        lines = [
+            f"Actor query: `{actor}`",
+            f"Matching events: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4c_timeline_lines(matches, limit=50))
+
+        await self.send_paginated(ctx, "Actor Audit Timeline", lines)
+
+    @logs.command(name="clusters")
+    async def logs_clusters(self, ctx):
+        """Cluster high-risk audit events by actor/category/action."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        clusters = self.b4c_cluster_events(events)
+
+        if not clusters:
+            await ctx.send(embed=info_embed("Audit Clusters", "No high-risk audit events available to cluster."))
+            return
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            f"Clusters: `{len(clusters)}`",
+            "",
+        ]
+
+        for idx, cluster in enumerate(clusters[:25], start=1):
+            reasons = sorted(cluster["reasons"].items(), key=lambda x: x[1], reverse=True)
+
+            lines.extend([
+                f"**Cluster {idx}**",
+                f"Actor: `{cluster['actor']}`",
+                f"Category: `{cluster['category']}`",
+                f"Action: `{cluster['action']}`",
+                f"Severity: `{cluster['severity']}` | Events: `{len(cluster['events'])}`",
+                f"Newest: `{cluster['newest']}`",
+                "Top reasons:",
+            ])
+
+            for reason, count in reasons[:5]:
+                lines.append(f"- {reason} — `{count}`")
+
+            lines.append("")
+
+        await self.send_paginated(ctx, "Audit Event Clusters", lines)
+
+    @logs.command(name="suspicious")
+    async def logs_suspicious(self, ctx):
+        """Rank high-risk audit events by suspiciousness."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        ranked = self.b4c_suspicious_events(events)
+
+        if not ranked:
+            await ctx.send(embed=ok_embed("Suspicious Audit Events", "No unusually suspicious high-risk events were found beyond the normal high-risk feed."))
+            return
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            f"Suspicious matches: `{len(ranked)}`",
+            "",
+        ]
+
+        for idx, (event, score, flags) in enumerate(ranked[:20], start=1):
+            c = self.b4a_classify_log_event(event)
+
+            lines.extend([
+                f"🚨 **Suspicious Event {idx}**",
+                f"Score: `{score}`",
+                f"ID: `{c['id'] or 'Unknown'}`",
+                f"Time: `{c['createdAt']}`",
+                f"Actor: `{c['actor']}`",
+                f"Action: `{c['action']}`",
+                f"Category: `{c['category']}`",
+                f"Reason: {c['reason']}",
+                f"Flags: {', '.join(flags)}",
+                f"Explain: `!mcore logs explain {c['id'] or c['reason'][:40]}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Suspicious Audit Events", lines)
+
+    @logs.command(name="correlate")
+    async def logs_correlate(self, ctx, *, query: str):
+        """Find events related to one event ID or query."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        if not events:
+            await ctx.send(embed=info_embed("Log Correlation", "No high-risk audit events returned by the API."))
+            return
+
+        base = self.b4b_find_single_event(events, query) if hasattr(self, "b4b_find_single_event") else None
+
+        if not base:
+            await ctx.send(embed=info_embed("Log Correlation", f"No base event matched `{query}`."))
+            return
+
+        base_c = self.b4a_classify_log_event(base)
+
+        related = []
+
+        for event in events:
+            c = self.b4a_classify_log_event(event)
+
+            if c.get("id") == base_c.get("id"):
+                continue
+
+            score = self.b4c_related_score(base, event)
+
+            if score >= 5:
+                related.append((event, score))
+
+        related.sort(key=lambda x: x[1], reverse=True)
+
+        lines = [
+            "**Base event:**",
+            f"ID: `{base_c['id'] or 'Unknown'}`",
+            f"Time: `{base_c['createdAt']}`",
+            f"Actor: `{base_c['actor']}`",
+            f"Action: `{base_c['action']}`",
+            f"Category: `{base_c['category']}`",
+            f"Reason: {base_c['reason']}",
+            "",
+            f"Related events found: `{len(related)}`",
+            "",
+        ]
+
+        if not related:
+            lines.append("No strongly related events found.")
+        else:
+            for idx, (event, score) in enumerate(related[:15], start=1):
+                c = self.b4a_classify_log_event(event)
+
+                lines.extend([
+                    f"**Related Event {idx}** — score `{score}`",
+                    f"ID: `{c['id'] or 'Unknown'}`",
+                    f"Time: `{c['createdAt']}`",
+                    f"Actor: `{c['actor']}`",
+                    f"Action: `{c['action']}`",
+                    f"Category: `{c['category']}`",
+                    f"Reason: {c['reason']}",
+                    "",
+                ])
+
+        await self.send_paginated(ctx, "Log Correlation", lines)
 
     @logs.command(name="find")
     async def logs_find(self, ctx, *, query: str):
