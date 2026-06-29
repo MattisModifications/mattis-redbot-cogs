@@ -2758,7 +2758,7 @@ class MattisCore(commands.Cog):
 
             e = self.build_log_embed(rule_key, rule, item, selected_key, index, total)
             notify_content = await self.notify_content_for(guild, rule["purpose"], source="logs")
-            await channel.send(
+            await self.b2_alert_guarded_send(ctx.guild, channel, 
                 content=notify_content or None,
                 embed=e,
                 allowed_mentions=self.notify_allowed_mentions(),
@@ -3621,7 +3621,7 @@ class MattisCore(commands.Cog):
 
         notify_content = await self.notify_content_for(guild, purpose, source="logs")
 
-        await channel.send(
+        await self.b2_alert_guarded_send(ctx.guild, channel, 
             content=notify_content or None,
             embed=e,
             allowed_mentions=self.notify_allowed_mentions(),
@@ -6876,6 +6876,169 @@ class MattisCore(commands.Cog):
             prefix = "🚨 ALERT"
 
         return f"{prefix} · Status: `{status}` · Severity: `{severity}` · Count: `{count}`"
+
+
+    async def b2_alert_embed_signature(self, embed=None, content=None):
+        """Build a stable alert signature from content/embed without leaking secrets."""
+        import re
+        import json
+        import hashlib
+
+        def clean(value):
+            value = "" if value is None else str(value)
+            value = re.sub(r"`[^`]{24,}`", "`<redacted>`", value)
+            value = re.sub(r"\b[A-Za-z0-9_\-]{32,}\b", "<redacted>", value)
+            value = re.sub(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+\-Z]+\b", "<time>", value)
+            value = re.sub(r"<t:\d+:[A-Za-z]>", "<time>", value)
+            value = re.sub(r"\s+", " ", value).strip()
+            return value
+
+        data = {
+            "content": clean(content),
+            "title": "",
+            "description": "",
+            "fields": [],
+            "footer": "",
+        }
+
+        if embed is not None:
+            try:
+                data["title"] = clean(getattr(embed, "title", "") or "")
+                data["description"] = clean(getattr(embed, "description", "") or "")
+
+                for field in getattr(embed, "fields", []) or []:
+                    name = clean(getattr(field, "name", "") or "")
+                    value = clean(getattr(field, "value", "") or "")
+                    data["fields"].append([name, value])
+
+                footer = getattr(embed, "footer", None)
+                data["footer"] = clean(getattr(footer, "text", "") or "")
+            except Exception:
+                data["embed"] = clean(repr(embed))
+
+        raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest(), data
+
+    async def b2_alert_identity(self, embed=None, content=None):
+        """Build the alert identity. Same issue = same identity, changed details = new fingerprint."""
+        import re
+        import hashlib
+        import json
+
+        fp, data = await self.b2_alert_embed_signature(embed=embed, content=content)
+
+        # Prefer explicit alert IDs if the embed already contains one.
+        chunks = [
+            data.get("title", ""),
+            data.get("description", ""),
+            data.get("footer", ""),
+        ]
+
+        for name, value in data.get("fields", []):
+            if "alert id" in name.lower() or name.lower() in {"id", "key", "incident id"}:
+                if value:
+                    return "explicit:" + re.sub(r"\s+", "-", value.lower())[:120]
+
+        joined = " ".join(chunks)
+
+        # Remove changing bits so repeated checks point at the same alert identity.
+        stable = joined.lower()
+        stable = re.sub(r"\b\d+\b", "<n>", stable)
+        stable = re.sub(r"\b(low|medium|high|critical|new|ongoing|updated|resolved|reopened)\b", "<state>", stable)
+        stable = re.sub(r"\b\d{4}-\d{2}-\d{2}[t ][0-9:.+\-z]+\b", "<time>", stable)
+        stable = re.sub(r"<t:\d+:[a-z]>", "<time>", stable)
+        stable = re.sub(r"\s+", " ", stable).strip()
+
+        if not stable:
+            stable = json.dumps(data, sort_keys=True, ensure_ascii=False)
+
+        digest = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
+        return f"auto:{digest}"
+
+    async def b2_alert_guarded_send(self, guild, channel, *args, **kwargs):
+        """
+        Hard lifecycle gate for alert check sends.
+
+        Behaviour:
+        - first time: send
+        - exact same alert again: suppress silently
+        - same alert but changed details: post once as update
+        - stores state in Red config under alert_lifecycle.b2_state
+        """
+        if channel is None:
+            return None
+
+        content = kwargs.get("content", None)
+        embed = kwargs.get("embed", None)
+
+        if args and content is None and isinstance(args[0], str):
+            content = args[0]
+
+        cfg = await get_core_config(self.bot)
+
+        try:
+            lifecycle = await cfg.guild(guild).alert_lifecycle()
+        except Exception:
+            lifecycle = {}
+
+        lifecycle = lifecycle or {}
+
+        settings = lifecycle.get("settings", {})
+        enabled = settings.get("enabled", True)
+
+        if not enabled:
+            return await channel.send(*args, **kwargs)
+
+        fingerprint, data = await self.b2_alert_embed_signature(embed=embed, content=content)
+        identity = await self.b2_alert_identity(embed=embed, content=content)
+
+        state = lifecycle.get("b2_state", {})
+        existing = state.get(identity)
+
+        now = int(__import__("time").time())
+
+        # Same alert, no actual content change = do not post again.
+        if existing and existing.get("fingerprint") == fingerprint and not existing.get("resolved"):
+            existing["last_seen"] = now
+            existing["suppressed_count"] = int(existing.get("suppressed_count", 0)) + 1
+            state[identity] = existing
+            lifecycle["b2_state"] = state
+            await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+            return None
+
+        # Changed alert details = post once and mark as updated.
+        status = "NEW"
+
+        if existing and existing.get("fingerprint") != fingerprint:
+            status = "UPDATED"
+
+            try:
+                if embed is not None:
+                    old_title = getattr(embed, "title", None)
+                    if old_title and not str(old_title).startswith(("🔁", "🚨", "✅", "⚠️")):
+                        embed.title = f"🔁 UPDATED · {old_title}"
+            except Exception:
+                pass
+
+        sent = await channel.send(*args, **kwargs)
+
+        state[identity] = {
+            "identity": identity,
+            "fingerprint": fingerprint,
+            "status": status,
+            "first_seen": existing.get("first_seen", now) if existing else now,
+            "last_seen": now,
+            "last_channel_id": getattr(channel, "id", None),
+            "last_message_id": getattr(sent, "id", None),
+            "post_count": int(existing.get("post_count", 0)) + 1 if existing else 1,
+            "suppressed_count": int(existing.get("suppressed_count", 0)) if existing else 0,
+            "title": data.get("title") or data.get("content") or identity,
+        }
+
+        lifecycle["b2_state"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+        return sent
 
     async def alert_lifecycle_send(self, guild: discord.Guild, rule_name: str, channel, *, content=None, embed=None, allowed_mentions=None, item=None):
         action, record, previous = await self.alert_lifecycle_decide(guild, rule_name, item if item is not None else {"rule": rule_name})
