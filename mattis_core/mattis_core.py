@@ -5105,27 +5105,202 @@ class MattisCore(commands.Cog):
             await self.run_log_checks(guild, dry_run=False, force=False)
 
     @mcore.group(name="logs", invoke_without_command=True)
+
     async def logs(self, ctx):
-        """Full log forwarding engine."""
+        """Mattis log forwarding + operations log intelligence."""
         if not await require_admin(ctx):
             return
 
-        settings = await self.get_log_settings(ctx.guild)
-        state = await self.get_log_state(ctx.guild)
+        lines = [
+            "**Mattis Log Forwarding Engine**",
+            "",
+            "`!mcore logs list` — forwarding rules",
+            "`!mcore logs preview` — preview forwarding",
+            "`!mcore logs check` — run forwarding check",
+            "`!mcore logs force` — force forwarding",
+            "`!mcore logs enable` — enable forwarding",
+            "`!mcore logs disable` — disable forwarding",
+            "",
+            "**Operations Log Intelligence**",
+            "",
+            "`!mcore logs highrisk` — show newest high-risk audit entries",
+            "`!mcore logs audit` — high-risk audit summary",
+            "`!mcore logs actors` — group high-risk logs by actor",
+            "`!mcore logs actions` — group high-risk logs by action",
+            "`!mcore logs reasons` — group high-risk logs by reason",
+            "`!mcore logs secrets` — secret/token/key/webhook related entries",
+            "`!mcore logs summary` — full operations log summary",
+        ]
 
-        e = embed("Mattis Log Forwarding Engine")
-        e.add_field(name="Enabled", value="✅ yes" if settings.get("enabled") else "❌ no", inline=True)
-        e.add_field(name="Interval", value=f"`{settings.get('interval_minutes', 5)} min`", inline=True)
-        e.add_field(name="Max items/rule", value=f"`{settings.get('max_items_per_rule', 25)}`", inline=True)
-        e.add_field(name="Rules", value=f"`{len(self.log_rules())}`", inline=True)
-        e.add_field(name="Last run", value=f"<t:{int(state.get('_last_run', 0))}:R>" if state.get("_last_run") else "Never", inline=True)
-        e.add_field(
-            name="Commands",
-            value="`!mcore logs list`\n`!mcore logs preview`\n`!mcore logs check`\n`!mcore logs force`\n`!mcore logs enable`\n`!mcore logs disable`",
-            inline=False,
-        )
+        await self.send_paginated(ctx, "Mattis Logs", lines)
 
-        await ctx.send(embed=e)
+
+    @logs.command(name="highrisk")
+    async def logs_highrisk(self, ctx):
+        """Show newest high-risk audit log entries."""
+        if not await require_admin(ctx):
+            return
+
+        try:
+            data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        except Exception as e:
+            await ctx.send(embed=error_embed("High-risk logs failed", f"Could not fetch `/bot/audit/highrisk`.\n`{type(e).__name__}: {e}`"))
+            return
+
+        events = data.get("events") or []
+
+        if not events:
+            await ctx.send(embed=ok_embed("High-Risk Audit Logs", "No high-risk audit events returned by the API."))
+            return
+
+        lines = [
+            f"Endpoint: `{data.get('endpoint')}`",
+            f"API: `HTTP {data.get('status')}`",
+            f"Events returned: `{len(events)}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_event_lines(events, limit=12))
+
+        await self.send_paginated(ctx, "High-Risk Audit Logs", lines)
+
+    @logs.command(name="audit")
+    async def logs_audit(self, ctx):
+        """Show high-risk audit summary."""
+        if not await require_admin(ctx):
+            return
+
+        try:
+            data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        except Exception as e:
+            await ctx.send(embed=error_embed("Audit summary failed", f"Could not fetch audit logs.\n`{type(e).__name__}: {e}`"))
+            return
+
+        events = data.get("events") or []
+
+        lines = [
+            f"Endpoint: `{data.get('endpoint')}`",
+            f"API: `HTTP {data.get('status')}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_log_summary_lines(events))
+
+        await self.send_paginated(ctx, "Audit Log Summary", lines)
+
+    @logs.command(name="summary")
+    async def logs_summary(self, ctx):
+        """Show operations log summary."""
+        if not await require_admin(ctx):
+            return
+
+        await self.logs_audit(ctx)
+
+    @logs.command(name="actors")
+    async def logs_actors(self, ctx):
+        """Group high-risk logs by actor."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+        classified = [self.b4a_classify_log_event(e) for e in events]
+        grouped = self.b4a_group_counts([x["actor"] for x in classified])
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            "",
+            "**Actors:**",
+        ]
+
+        for actor, count in grouped[:25]:
+            lines.append(f"- `{actor}` — `{count}` event(s)")
+
+        if not grouped:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "Audit Log Actors", lines)
+
+    @logs.command(name="actions")
+    async def logs_actions(self, ctx):
+        """Group high-risk logs by action."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+        classified = [self.b4a_classify_log_event(e) for e in events]
+        grouped = self.b4a_group_counts([x["action"] for x in classified])
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            "",
+            "**Actions:**",
+        ]
+
+        for action, count in grouped[:25]:
+            lines.append(f"- `{action}` — `{count}` event(s)")
+
+        if not grouped:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "Audit Log Actions", lines)
+
+    @logs.command(name="reasons")
+    async def logs_reasons(self, ctx):
+        """Group high-risk logs by reason."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+        classified = [self.b4a_classify_log_event(e) for e in events]
+        grouped = self.b4a_group_counts([x["reason"] for x in classified])
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            "",
+            "**Reasons:**",
+        ]
+
+        for reason, count in grouped[:30]:
+            lines.append(f"- {reason} — `{count}` event(s)")
+
+        if not grouped:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "Audit Log Reasons", lines)
+
+    @logs.command(name="secrets")
+    async def logs_secrets(self, ctx):
+        """Show secret/token/key/webhook related high-risk logs."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        matches = []
+
+        for event in events:
+            reason = self.b4a_log_event_reason(event).lower()
+            action = self.b4a_log_event_action(event).lower()
+
+            if any(word in reason or word in action for word in ["secret", "token", "key", "webhook", "stripe", "roblox"]):
+                matches.append(event)
+
+        if not matches:
+            await ctx.send(embed=ok_embed("Secret/Token Audit Logs", "No secret/token/key/webhook related high-risk events were found."))
+            return
+
+        lines = [
+            f"Matching events: `{len(matches)}`",
+            "",
+        ]
+
+        lines.extend(self.b4a_event_lines(matches, limit=15))
+
+        await self.send_paginated(ctx, "Secret/Token Audit Logs", lines)
 
     @logs.command(name="list")
     async def logs_list(self, ctx):
