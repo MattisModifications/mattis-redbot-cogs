@@ -11,6 +11,7 @@ from .shared_mattis import (
     q,
     simple_counts_embed,
     require_support,
+    require_general_support,
 )
 
 
@@ -22,13 +23,13 @@ class MattisCRM(commands.Cog):
 
     @commands.group(name="mcrm", invoke_without_command=True)
     async def mcrm(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
         await ctx.send_help(ctx.command)
 
     @mcrm.command(name="lookup")
     async def lookup(self, ctx, *, query: str):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={q(query)}")
@@ -41,7 +42,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="health")
     async def health(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/health")
@@ -49,7 +50,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="onboarding")
     async def onboarding(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/onboarding")
@@ -57,7 +58,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="trials")
     async def trials(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/trials")
@@ -65,7 +66,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="atrisk")
     async def atrisk(self, ctx):
-        if not await require_support(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/atrisk")
@@ -73,7 +74,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="suspended")
     async def suspended(self, ctx):
-        if not await require_support(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/suspended")
@@ -81,7 +82,7 @@ class MattisCRM(commands.Cog):
 
     @mcrm.command(name="frozen")
     async def frozen(self, ctx):
-        if not await require_support(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/crm/frozen")

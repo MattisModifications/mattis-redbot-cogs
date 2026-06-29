@@ -5,6 +5,7 @@ from .shared_mattis import (
     request_json,
     require_staff,
     simple_counts_embed,
+    require_applications_access,
 )
 
 
@@ -16,13 +17,13 @@ class MattisApplications(commands.Cog):
 
     @commands.group(name="mapps", invoke_without_command=True)
     async def mapps(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_applications_access(ctx):
             return
         await self.summary(ctx)
 
     @mapps.command(name="summary", aliases=["forms", "stats"])
     async def summary(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_applications_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/applications/summary")
@@ -30,7 +31,7 @@ class MattisApplications(commands.Cog):
 
     @mapps.command(name="recent", aliases=["pending", "submissions"])
     async def recent(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_applications_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/applications/recent")

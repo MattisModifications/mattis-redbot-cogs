@@ -10,6 +10,7 @@ from .shared_mattis import (
     workspace_line,
     q,
     require_development,
+    require_discord_systems,
 )
 
 
@@ -21,13 +22,13 @@ class MattisDiscord(commands.Cog):
 
     @commands.group(name="mdiscord", invoke_without_command=True)
     async def mdiscord(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_discord_systems(ctx):
             return
         await self.summary(ctx)
 
     @mdiscord.command(name="summary")
     async def summary(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_discord_systems(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/discord/summary")
@@ -35,7 +36,7 @@ class MattisDiscord(commands.Cog):
 
     @mdiscord.command(name="broken")
     async def broken(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_discord_systems(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/discord/broken")
@@ -43,7 +44,7 @@ class MattisDiscord(commands.Cog):
 
     @mdiscord.command(name="workspace", aliases=["routes", "mappings", "syncstatus"])
     async def workspace(self, ctx, *, workspace: str):
-        if not await require_staff(ctx):
+        if not await require_discord_systems(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/discord/workspace/{q(workspace)}")
@@ -61,7 +62,7 @@ class MattisDiscord(commands.Cog):
 
     @mdiscord.command(name="test")
     async def test(self, ctx, *, workspace: str):
-        if not await require_development(ctx):
+        if not await require_discord_systems(ctx):
             return
 
         await ctx.send(embed=embed("Discord Test", "Test-message actions will be enabled in the controlled admin-action phase."))

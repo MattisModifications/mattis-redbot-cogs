@@ -14,6 +14,8 @@ from .shared_mattis import (
     get_core_config,
     fmt_payload,
     simple_counts_embed,
+    require_system_status,
+    require_production,
 )
 
 
@@ -26,13 +28,13 @@ class MattisStatus(commands.Cog):
     @commands.group(name="mstatus", invoke_without_command=True)
     async def mstatus(self, ctx):
         """Mattis CMS | Systems health summary."""
-        if not await require_staff(ctx):
+        if not await require_system_status(ctx):
             return
         await self.overview(ctx)
 
     @mstatus.command(name="overview")
     async def overview(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_system_status(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/status")
@@ -45,7 +47,7 @@ class MattisStatus(commands.Cog):
 
     @mstatus.command(name="api")
     async def api(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_system_status(ctx):
             return
 
         cfg = await get_core_config(self.bot)
@@ -65,7 +67,7 @@ class MattisStatus(commands.Cog):
 
     @mstatus.command(name="web")
     async def web(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_system_status(ctx):
             return
 
         web_url = "https://mattisproductions.com"
@@ -88,7 +90,7 @@ class MattisStatus(commands.Cog):
 
     @mstatus.command(name="database", aliases=["redis", "workers", "pm2"])
     async def admin_snapshot(self, ctx):
-        if not await require_development(ctx):
+        if not await require_production(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/systems/counts")

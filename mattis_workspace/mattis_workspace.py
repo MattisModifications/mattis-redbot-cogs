@@ -9,6 +9,7 @@ from .shared_mattis import (
     workspace_line,
     q,
     add_fields,
+    require_workspace_access,
 )
 
 
@@ -20,13 +21,13 @@ class MattisWorkspace(commands.Cog):
 
     @commands.group(name="mworkspace", aliases=["mws"], invoke_without_command=True)
     async def mworkspace(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
         await self.list(ctx)
 
     @mworkspace.command(name="list")
     async def list(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/workspaces")
@@ -34,7 +35,7 @@ class MattisWorkspace(commands.Cog):
 
     @mworkspace.command(name="status")
     async def status(self, ctx, *, workspace: str = ""):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         path = f"/bot/workspaces/{q(workspace)}" if workspace else "/bot/workspaces"
@@ -50,7 +51,7 @@ class MattisWorkspace(commands.Cog):
 
     @mworkspace.command(name="config", aliases=["health"])
     async def config(self, ctx, *, workspace: str = ""):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         if not workspace:
@@ -67,7 +68,7 @@ class MattisWorkspace(commands.Cog):
 
     @mworkspace.command(name="integrations", aliases=["modules"])
     async def integrations(self, ctx, *, workspace: str):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/workspaces/{q(workspace)}/integrations")
@@ -88,7 +89,7 @@ class MattisWorkspace(commands.Cog):
 
     @mworkspace.command(name="audit")
     async def audit(self, ctx, *, workspace: str):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/audit/search?q={q(workspace)}")

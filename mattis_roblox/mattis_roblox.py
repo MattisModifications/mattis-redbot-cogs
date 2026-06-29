@@ -10,6 +10,7 @@ from .shared_mattis import (
     workspace_line,
     q,
     require_development,
+    require_roblox_systems,
 )
 
 
@@ -21,13 +22,13 @@ class MattisRoblox(commands.Cog):
 
     @commands.group(name="mroblox", invoke_without_command=True)
     async def mroblox(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_roblox_systems(ctx):
             return
         await self.summary(ctx)
 
     @mroblox.command(name="summary")
     async def summary(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_roblox_systems(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/roblox/summary")
@@ -35,7 +36,7 @@ class MattisRoblox(commands.Cog):
 
     @mroblox.command(name="broken")
     async def broken(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_roblox_systems(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/roblox/broken")
@@ -43,7 +44,7 @@ class MattisRoblox(commands.Cog):
 
     @mroblox.command(name="workspace", aliases=["group", "ranks", "policies", "telemetry", "keys", "syncstatus"])
     async def workspace(self, ctx, *, workspace: str):
-        if not await require_staff(ctx):
+        if not await require_roblox_systems(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/roblox/workspace/{q(workspace)}")
@@ -63,7 +64,7 @@ class MattisRoblox(commands.Cog):
 
     @mroblox.command(name="forcesync")
     async def forcesync(self, ctx, *, workspace: str):
-        if not await require_development(ctx):
+        if not await require_roblox_systems(ctx):
             return
 
         await ctx.send(embed=embed("Roblox Force Sync", "Force-sync actions will be enabled in the controlled admin-action phase."))

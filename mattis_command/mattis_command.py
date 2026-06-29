@@ -9,6 +9,7 @@ from .shared_mattis import (
     line_list,
     workspace_line,
     q,
+    require_workspace_access,
 )
 
 
@@ -21,13 +22,13 @@ class MattisSystems(commands.Cog):
     @commands.group(name="msystems", invoke_without_command=True)
     async def msystems(self, ctx):
         """Mattis CMS | Systems dashboard."""
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
         await self.overview(ctx)
 
     @msystems.command(name="overview")
     async def overview(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/systems/overview")
@@ -40,7 +41,7 @@ class MattisSystems(commands.Cog):
 
     @msystems.command(name="links")
     async def links(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/systems/links")
@@ -56,7 +57,7 @@ class MattisSystems(commands.Cog):
 
     @msystems.command(name="counts")
     async def counts(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/systems/counts")
@@ -82,7 +83,7 @@ class MattisSystems(commands.Cog):
 
     @msystems.command(name="modules")
     async def modules(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/modules/summary")
@@ -90,7 +91,7 @@ class MattisSystems(commands.Cog):
 
     @msystems.command(name="customer")
     async def customer(self, ctx, *, query: str):
-        if not await require_staff(ctx):
+        if not await require_workspace_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/crm/search?q={q(query)}")

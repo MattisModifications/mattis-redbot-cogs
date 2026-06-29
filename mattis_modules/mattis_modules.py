@@ -6,6 +6,7 @@ from .shared_mattis import (
     require_admin,
     require_development,
     simple_counts_embed,
+    require_backend_access,
 )
 
 
@@ -17,13 +18,13 @@ class MattisModules(commands.Cog):
 
     @commands.group(name="mmodules", invoke_without_command=True)
     async def mmodules(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_backend_access(ctx):
             return
         await self.summary(ctx)
 
     @mmodules.command(name="summary", aliases=["catalog", "usage"])
     async def summary(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_backend_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/modules/summary")
@@ -31,7 +32,7 @@ class MattisModules(commands.Cog):
 
     @mmodules.command(name="flags", aliases=["developer"])
     async def admin(self, ctx):
-        if not await require_development(ctx):
+        if not await require_backend_access(ctx):
             return
 
         await self.summary(ctx)

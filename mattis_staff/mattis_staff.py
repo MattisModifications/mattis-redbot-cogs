@@ -21,13 +21,13 @@ class MattisStaff(commands.Cog):
 
     @commands.group(name="mstaff", invoke_without_command=True)
     async def mstaff(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_management(ctx):
             return
         await self.summary(ctx)
 
     @mstaff.command(name="summary")
     async def summary(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_management(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/staff/summary")
@@ -35,7 +35,7 @@ class MattisStaff(commands.Cog):
 
     @mstaff.command(name="lookup")
     async def lookup(self, ctx, *, query: str):
-        if not await require_staff(ctx):
+        if not await require_management(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/staff/lookup?q={q(query)}")

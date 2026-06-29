@@ -7,6 +7,7 @@ from .shared_mattis import (
     require_admin,
     simple_counts_embed,
     require_development,
+    require_automation_access,
 )
 
 
@@ -18,13 +19,13 @@ class MattisAutomation(commands.Cog):
 
     @commands.group(name="mautomation", invoke_without_command=True)
     async def mautomation(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_automation_access(ctx):
             return
         await self.summary(ctx)
 
     @mautomation.command(name="summary", aliases=["workflows", "workers", "datatransfers"])
     async def summary(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_automation_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/automation/summary")
@@ -32,7 +33,7 @@ class MattisAutomation(commands.Cog):
 
     @mautomation.command(name="failed", aliases=["recent"])
     async def failed(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_automation_access(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/automation/failed")
@@ -48,7 +49,7 @@ class MattisAutomation(commands.Cog):
 
     @mautomation.command(name="run")
     async def run(self, ctx, *, workflow: str):
-        if not await require_development(ctx):
+        if not await require_automation_access(ctx):
             return
 
         await ctx.send(embed=embed("Run Workflow", "Workflow execution will be enabled in the controlled admin-action phase."))

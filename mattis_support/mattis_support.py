@@ -9,6 +9,7 @@ from .shared_mattis import (
     q,
     simple_counts_embed,
     require_support,
+    require_general_support,
 )
 
 
@@ -20,13 +21,13 @@ class MattisSupport(commands.Cog):
 
     @commands.group(name="msupport", invoke_without_command=True)
     async def msupport(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
         await self.open_tickets(ctx)
 
     @msupport.command(name="stats")
     async def stats(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/support/stats")
@@ -34,7 +35,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="open")
     async def open_tickets(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/support/open")
@@ -42,7 +43,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="all")
     async def all_tickets(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/support/all")
@@ -50,7 +51,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="critical")
     async def critical(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/support/critical")
@@ -58,7 +59,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="unassigned")
     async def unassigned(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/support/unassigned")
@@ -66,7 +67,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="search")
     async def search(self, ctx, *, query: str):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/support/search?q={q(query)}")
@@ -74,7 +75,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="ticket")
     async def ticket(self, ctx, ticket_id: str):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", f"/bot/support/ticket/{q(ticket_id)}")
@@ -84,7 +85,7 @@ class MattisSupport(commands.Cog):
 
     @msupport.command(name="categories")
     async def categories(self, ctx):
-        if not await require_staff(ctx):
+        if not await require_general_support(ctx):
             return
 
         status, payload = await request_json(self.bot, "GET", "/bot/support/categories")

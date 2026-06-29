@@ -888,3 +888,100 @@ def default_capabilities_for_guild(guild: discord.Guild) -> dict[str, list[int]]
 
     return caps
 
+
+
+# ------------------------------
+# Exact command capability gates
+# ------------------------------
+
+async def require_security_support(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "security_support",
+        "security_admin",
+        "incident_response",
+        label="security_support, security_admin, incident_response",
+    )
+
+
+async def require_backend_access(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "backend_access",
+        "infrastructure_admin",
+        label="backend_access, infrastructure_admin",
+    )
+
+
+async def require_system_status(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "technical_support",
+        "development_read",
+        "production_access",
+        "infrastructure_admin",
+        "management_view",
+        label="technical_support, development_read, production_access, infrastructure_admin, management_view",
+    )
+
+
+async def require_discord_systems(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "discord_systems",
+        "infrastructure_admin",
+        label="discord_systems, infrastructure_admin",
+    )
+
+
+async def require_roblox_systems(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "roblox_systems",
+        "infrastructure_admin",
+        label="roblox_systems, infrastructure_admin",
+    )
+
+
+async def require_automation_access(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "automation_access",
+        "infrastructure_admin",
+        label="automation_access, infrastructure_admin",
+    )
+
+
+async def require_workspace_access(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "general_support",
+        "support_lead",
+        "billing_support",
+        "technical_support",
+        "security_support",
+        "moderation",
+        "incident_response",
+        "audit_review",
+        "development_read",
+        "backend_access",
+        "production_access",
+        "release_manager",
+        "qa_testing",
+        "design_access",
+        "management_view",
+        "finance_view",
+        "infrastructure_admin",
+        "security_admin",
+        label="staff workspace capability",
+    )
+
+
+async def require_applications_access(ctx) -> bool:
+    return await require_capability(
+        ctx,
+        "management_view",
+        "support_lead",
+        label="management_view, support_lead",
+    )
+
