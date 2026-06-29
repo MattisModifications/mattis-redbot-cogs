@@ -2366,6 +2366,312 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Operations Alerts", lines)
 
+
+    def b3b_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b3b_actor(self, ctx) -> str:
+        try:
+            return f"{ctx.author} ({ctx.author.id})"
+        except Exception:
+            return "Unknown"
+
+    def b3b_add_timeline(self, item: dict, action: str, actor: str, details: str = "") -> dict:
+        item = item or {}
+        timeline = item.get("timeline") or []
+
+        timeline.append({
+            "at": self.b3b_now_iso(),
+            "action": action,
+            "actor": actor,
+            "details": details or "",
+        })
+
+        item["timeline"] = timeline[-75:]
+        return item
+
+    async def b3b_save_alert_item(self, guild, alert_id: str, item: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("b2_state") or lifecycle.get("state") or {}
+        state[alert_id] = item
+
+        lifecycle["b2_state"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    async def b3b_find_alert(self, guild, query: str):
+        if hasattr(self, "b3a_find_alert_state_item"):
+            return await self.b3a_find_alert_state_item(guild, query)
+
+        return None, None
+
+    async def b3b_try_edit_alert_message(self, guild, item: dict):
+        try:
+            channel_id = item.get("last_channel_id")
+            message_id = item.get("last_message_id")
+
+            if not channel_id or not message_id:
+                return False
+
+            channel = guild.get_channel(int(channel_id))
+            if not channel:
+                return False
+
+            message = await channel.fetch_message(int(message_id))
+            embed = await self.b3a_render_alert_embed(guild, meta=item)
+            await message.edit(embed=embed)
+            return True
+        except Exception:
+            return False
+
+    def b3b_find_role_from_text(self, guild, text: str):
+        text = str(text or "").strip()
+
+        if not guild or not text:
+            return None
+
+        # Mention ID.
+        import re
+        m = re.search(r"<@&(\d+)>", text)
+        if m:
+            role_id = int(m.group(1))
+            return guild.get_role(role_id)
+
+        lowered = text.lower().lstrip("@").strip()
+
+        for role in getattr(guild, "roles", []):
+            if role.name.lower() == lowered:
+                return role
+
+        for role in getattr(guild, "roles", []):
+            if lowered in role.name.lower():
+                return role
+
+        return None
+
+
+    @alerts.command(name="ack")
+    async def alerts_ack(self, ctx, alert_id: str, *, note: str = ""):
+        """Acknowledge an active alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        actor = self.b3b_actor(ctx)
+
+        item["status"] = "acknowledged"
+        item["acknowledged_by"] = str(ctx.author)
+        item["acknowledged_by_id"] = getattr(ctx.author, "id", None)
+        item["acknowledged_at"] = self.b3b_now_iso()
+        item["last_seen"] = item["acknowledged_at"]
+
+        if note:
+            notes = item.get("notes") or []
+            notes.append({
+                "at": self.b3b_now_iso(),
+                "author": str(ctx.author),
+                "note": note,
+            })
+            item["notes"] = notes[-50:]
+
+        item = self.b3b_add_timeline(item, "acknowledged", actor, note)
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+        await self.b3b_try_edit_alert_message(ctx.guild, item)
+
+        await ctx.send(embed=ok_embed("Alert acknowledged", f"`{item.get('title', key)}` has been acknowledged."))
+
+    @alerts.command(name="resolve")
+    async def alerts_resolve(self, ctx, alert_id: str, *, note: str = ""):
+        """Mark an alert as resolved."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        actor = self.b3b_actor(ctx)
+
+        item["status"] = "resolved"
+        item["resolved"] = True
+        item["resolved_by"] = str(ctx.author)
+        item["resolved_by_id"] = getattr(ctx.author, "id", None)
+        item["resolved_at"] = self.b3b_now_iso()
+        item["last_seen"] = item["resolved_at"]
+
+        if note:
+            notes = item.get("notes") or []
+            notes.append({
+                "at": self.b3b_now_iso(),
+                "author": str(ctx.author),
+                "note": note,
+            })
+            item["notes"] = notes[-50:]
+
+        item = self.b3b_add_timeline(item, "resolved", actor, note)
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+        await self.b3b_try_edit_alert_message(ctx.guild, item)
+
+        await ctx.send(embed=ok_embed("Alert resolved", f"`{item.get('title', key)}` has been marked resolved."))
+
+    @alerts.command(name="reopen")
+    async def alerts_reopen(self, ctx, alert_id: str, *, note: str = ""):
+        """Reopen a resolved/acknowledged alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        actor = self.b3b_actor(ctx)
+
+        item["status"] = "reopened"
+        item["resolved"] = False
+        item["reopened_by"] = str(ctx.author)
+        item["reopened_by_id"] = getattr(ctx.author, "id", None)
+        item["reopened_at"] = self.b3b_now_iso()
+        item["last_seen"] = item["reopened_at"]
+
+        if note:
+            notes = item.get("notes") or []
+            notes.append({
+                "at": self.b3b_now_iso(),
+                "author": str(ctx.author),
+                "note": note,
+            })
+            item["notes"] = notes[-50:]
+
+        item = self.b3b_add_timeline(item, "reopened", actor, note)
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+        await self.b3b_try_edit_alert_message(ctx.guild, item)
+
+        await ctx.send(embed=ok_embed("Alert reopened", f"`{item.get('title', key)}` has been reopened."))
+
+    @alerts.command(name="assign")
+    async def alerts_assign(self, ctx, alert_id: str, *, assignment: str):
+        """Assign an alert to a Discord role."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        role = self.b3b_find_role_from_text(ctx.guild, assignment)
+
+        if not role:
+            await ctx.send(embed=error_embed("Role not found", "Mention a role or type its exact name. Example: `!mcore alerts assign audit @Security Admin`"))
+            return
+
+        actor = self.b3b_actor(ctx)
+
+        item["assigned_role_id"] = role.id
+        item["assigned_role_name"] = role.name
+        item["assigned_by"] = str(ctx.author)
+        item["assigned_by_id"] = getattr(ctx.author, "id", None)
+        item["assigned_at"] = self.b3b_now_iso()
+        item["owner"] = role.name
+
+        item = self.b3b_add_timeline(item, "assigned", actor, f"Assigned to {role.name}")
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+        await self.b3b_try_edit_alert_message(ctx.guild, item)
+
+        await ctx.send(embed=ok_embed("Alert assigned", f"`{item.get('title', key)}` assigned to `{role.name}`."))
+
+    @alerts.command(name="note")
+    async def alerts_note(self, ctx, alert_id: str, *, note: str):
+        """Add an internal note to an alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        notes = item.get("notes") or []
+
+        notes.append({
+            "at": self.b3b_now_iso(),
+            "author": str(ctx.author),
+            "note": note,
+        })
+
+        item["notes"] = notes[-50:]
+        item = self.b3b_add_timeline(item, "note", self.b3b_actor(ctx), note)
+
+        await self.b3b_save_alert_item(ctx.guild, key, item)
+
+        await ctx.send(embed=ok_embed("Alert note added", f"Added note to `{item.get('title', key)}`."))
+
+    @alerts.command(name="timeline")
+    async def alerts_timeline(self, ctx, *, alert_id: str):
+        """Show the timeline and notes for an alert."""
+        if not await require_admin(ctx):
+            return
+
+        key, item = await self.b3b_find_alert(ctx.guild, alert_id)
+
+        if not item:
+            await ctx.send(embed=error_embed("Alert not found", "I could not find a tracked alert matching that ID/title."))
+            return
+
+        lines = [
+            f"**{item.get('title', key)}**",
+            f"Status: `{self.b3a_status_label(item.get('status', 'ongoing'))}`",
+            f"Severity: `{str(item.get('severity', 'unknown')).title()}`",
+            f"Owner: `{item.get('owner', 'Unknown')}`",
+            "",
+            "**Timeline:**",
+        ]
+
+        timeline = item.get("timeline") or []
+
+        if not timeline:
+            lines.append("No timeline events yet.")
+        else:
+            for entry in timeline[-25:]:
+                at = entry.get("at", "Unknown time")
+                action = entry.get("action", "event")
+                actor = entry.get("actor", "Unknown")
+                details = entry.get("details", "")
+
+                if details:
+                    lines.append(f"- `{at}` — **{action}** by `{actor}` — {details}")
+                else:
+                    lines.append(f"- `{at}` — **{action}** by `{actor}`")
+
+        notes = item.get("notes") or []
+
+        if notes:
+            lines.extend(["", "**Notes:**"])
+
+            for note in notes[-15:]:
+                lines.append(f"- `{note.get('at', 'Unknown time')}` — `{note.get('author', 'Unknown')}`: {note.get('note', '')}")
+
+        lines.extend([
+            "",
+            f"Alert ID: `{str(key)[:180]}`",
+        ])
+
+        await self.send_paginated(ctx, "Alert Timeline", lines)
+
     @alerts.command(name="show")
 
     async def alerts_show(self, ctx, *, alert_id: str):
@@ -7527,12 +7833,11 @@ class MattisCore(commands.Cog):
 
 
 
+
     async def b3a_enrich_existing_alert_item(self, guild, alert_id: str, item: dict) -> dict:
-        """Rebuild Operations Alert Intelligence from the stable alert key, ignoring bad old generated titles."""
+        """Rebuild Operations Alert Intelligence from the stable alert key, while preserving action state."""
         item = item or {}
 
-        # IMPORTANT: old B3A accidentally saved giant redacted generated titles.
-        # Do not feed those titles back into classification.
         safe_raw = " ".join([
             str(alert_id or ""),
             str(item.get("identity") or ""),
@@ -7555,7 +7860,7 @@ class MattisCore(commands.Cog):
         merged = dict(item)
         merged.update(meta)
 
-        for key in [
+        preserve_keys = [
             "first_seen",
             "last_seen",
             "last_posted",
@@ -7566,9 +7871,34 @@ class MattisCore(commands.Cog):
             "fingerprint",
             "identity",
             "status",
-        ]:
+            "resolved",
+            "acknowledged_by",
+            "acknowledged_by_id",
+            "acknowledged_at",
+            "resolved_by",
+            "resolved_by_id",
+            "resolved_at",
+            "reopened_by",
+            "reopened_by_id",
+            "reopened_at",
+            "assigned_role_id",
+            "assigned_role_name",
+            "assigned_by",
+            "assigned_by_id",
+            "assigned_at",
+            "notes",
+            "timeline",
+        ]
+
+        for key in preserve_keys:
             if item.get(key) is not None:
                 merged[key] = item.get(key)
+
+        if item.get("assigned_role_name"):
+            merged["owner"] = item.get("assigned_role_name")
+
+        if item.get("resolved"):
+            merged["status"] = "resolved"
 
         merged["alert_id"] = alert_id
         merged["rule_id"] = alert_id
@@ -7902,9 +8232,12 @@ class MattisCore(commands.Cog):
             await cfg.guild(guild).alert_lifecycle.set(lifecycle)
             return None
 
-        status = "new"
-        if existing and existing.get("fingerprint") != fingerprint:
+        if existing and existing.get("resolved"):
+            status = "reopened"
+        elif existing and existing.get("fingerprint") != fingerprint:
             status = "updated"
+        else:
+            status = "new"
 
         meta = await self.b3a_build_alert_intelligence(
             guild,
