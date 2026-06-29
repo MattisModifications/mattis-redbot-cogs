@@ -1701,6 +1701,713 @@ class MattisCore(commands.Cog):
             "internal_impact": " ".join(internal_bits),
         }
 
+
+    async def b9_get_ops_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("ops_command_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("todo_counter", 0)
+        state.setdefault("todos", {})
+        state.setdefault("watch_counter", 0)
+        state.setdefault("watchlist", {})
+        state.setdefault("handover_notes", [])
+
+        return state
+
+    async def b9_set_ops_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["ops_command_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b9_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b9_safe(self, value, limit: int = 900) -> str:
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    async def b9_build_ops_snapshot(self, guild) -> dict:
+        snapshot = {
+            "created_at": self.b9_now_iso(),
+            "prod": None,
+            "prod_readiness": {},
+            "prod_summary": {},
+            "security": {},
+            "incidents": {},
+            "alerts": {},
+            "ops_state": await self.b9_get_ops_state(guild),
+        }
+
+        try:
+            if hasattr(self, "b5_build_readiness"):
+                prod = await self.b5_build_readiness(guild, include_optional=False)
+                snapshot["prod"] = prod
+                snapshot["prod_readiness"] = prod.get("readiness") or {}
+                snapshot["prod_summary"] = self.b5_endpoint_summary(prod.get("checks") or [])
+                snapshot["security"] = prod.get("security") or {}
+        except Exception as e:
+            snapshot["prod_error"] = f"{type(e).__name__}: {e}"
+
+        try:
+            if hasattr(self, "b8_active_incident_summary"):
+                snapshot["incidents"] = await self.b8_active_incident_summary(guild)
+            elif hasattr(self, "b7_get_incident_state"):
+                state = await self.b7_get_incident_state(guild)
+                incidents = state.get("incidents") or {}
+                open_items = [(k, v) for k, v in incidents.items() if str(v.get("status", "open")).lower() != "resolved"]
+                snapshot["incidents"] = {
+                    "open": len(open_items),
+                    "active_critical_high": 0,
+                    "items": open_items,
+                }
+        except Exception as e:
+            snapshot["incident_error"] = f"{type(e).__name__}: {e}"
+
+        try:
+            if hasattr(self, "b3d_get_alert_state"):
+                alert_state = await self.b3d_get_alert_state(guild)
+                open_alerts = []
+
+                for key, item in (alert_state or {}).items():
+                    status = str(item.get("status", "ongoing")).lower()
+                    if status != "resolved" and not item.get("resolved"):
+                        open_alerts.append((key, item))
+
+                snapshot["alerts"] = {
+                    "total": len(alert_state or {}),
+                    "open": len(open_alerts),
+                    "items": open_alerts,
+                }
+        except Exception as e:
+            snapshot["alert_error"] = f"{type(e).__name__}: {e}"
+
+        return snapshot
+
+    def b9_todo_counts(self, ops_state: dict) -> dict:
+        todos = ops_state.get("todos") or {}
+
+        open_items = [x for x in todos.values() if str(x.get("status", "open")).lower() != "done"]
+        done_items = [x for x in todos.values() if str(x.get("status", "open")).lower() == "done"]
+
+        return {
+            "total": len(todos),
+            "open": len(open_items),
+            "done": len(done_items),
+        }
+
+    def b9_watch_counts(self, ops_state: dict) -> dict:
+        watchlist = ops_state.get("watchlist") or {}
+
+        return {
+            "total": len(watchlist),
+        }
+
+    def b9_dashboard_lines(self, snapshot: dict) -> list[str]:
+        readiness = snapshot.get("prod_readiness") or {}
+        prod_summary = snapshot.get("prod_summary") or {}
+        security = snapshot.get("security") or {}
+        incidents = snapshot.get("incidents") or {}
+        alerts = snapshot.get("alerts") or {}
+        ops_state = snapshot.get("ops_state") or {}
+
+        todo_counts = self.b9_todo_counts(ops_state)
+        watch_counts = self.b9_watch_counts(ops_state)
+
+        lines = [
+            "**Mattis Unified Operations Dashboard**",
+            "",
+            f"Generated: `{snapshot.get('created_at')}`",
+            "",
+            "**Production:**",
+            f"Readiness: `{readiness.get('label', 'Unknown')}`",
+            f"Score: `{readiness.get('score', 'Unknown')}/100`",
+            f"Endpoints OK: `{prod_summary.get('ok', 0)}/{prod_summary.get('total', 0)}`",
+            f"Failed endpoints: `{prod_summary.get('failed', 0)}`",
+            "",
+            "**Incidents:**",
+            f"Active incidents: `{incidents.get('open', 0)}`",
+            f"Active critical/high: `{incidents.get('active_critical_high', 0)}`",
+            "",
+            "**Alerts:**",
+            f"Tracked alerts: `{alerts.get('total', 0)}`",
+            f"Open alerts: `{alerts.get('open', 0)}`",
+            "",
+            "**Security / Audit:**",
+            f"High-risk audit events: `{security.get('highrisk_events', 0)}`",
+            f"Secret/token/webhook events: `{security.get('secret_events', 0)}`",
+            "",
+            "**Ops Work:**",
+            f"Open todos: `{todo_counts['open']}`",
+            f"Completed todos: `{todo_counts['done']}`",
+            f"Watchlist items: `{watch_counts['total']}`",
+            "",
+        ]
+
+        blockers = readiness.get("blockers") or []
+        warnings = readiness.get("warnings") or []
+
+        lines.append("**Blockers:**")
+        if blockers:
+            for blocker in blockers[:8]:
+                lines.append(f"- 🚫 {blocker}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Warnings:**"])
+        if warnings:
+            for warning in warnings[:8]:
+                lines.append(f"- ⚠️ {warning}")
+        else:
+            lines.append("- None")
+
+        lines.extend([
+            "",
+            "**Next commands:**",
+            "`!mcore ops brief`",
+            "`!mcore ops actions`",
+            "`!mcore incident active`",
+            "`!mcore prod preflight release-name`",
+            "`!mcore logs executive`",
+        ])
+
+        return lines
+
+    def b9_brief_lines(self, snapshot: dict) -> list[str]:
+        readiness = snapshot.get("prod_readiness") or {}
+        security = snapshot.get("security") or {}
+        incidents = snapshot.get("incidents") or {}
+        alerts = snapshot.get("alerts") or {}
+        ops_state = snapshot.get("ops_state") or {}
+
+        lines = [
+            "**Operations Brief**",
+            "",
+            f"Production is currently `{readiness.get('label', 'Unknown')}` with score `{readiness.get('score', 'Unknown')}/100`.",
+            f"There are `{incidents.get('open', 0)}` active incident(s), including `{incidents.get('active_critical_high', 0)}` active critical/high incident(s).",
+            f"There are `{alerts.get('open', 0)}` open alert(s).",
+            f"The audit feed currently returns `{security.get('highrisk_events', 0)}` high-risk event(s), including `{security.get('secret_events', 0)}` secret/token/webhook related event(s).",
+            "",
+            "**Top active incidents:**",
+        ]
+
+        incident_items = incidents.get("items") or []
+
+        if incident_items:
+            for incident_id, inc in incident_items[:5]:
+                lines.append(
+                    f"- `{incident_id}` `{self.b7_severity_normalise(inc.get('severity')).title()}` `{str(inc.get('status', 'open')).title()}` — {self.b9_safe(inc.get('title'), 120)}"
+                )
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Top open alerts:**"])
+
+        alert_items = alerts.get("items") or []
+
+        if alert_items:
+            for alert_id, item in alert_items[:5]:
+                title = item.get("title") or alert_id
+                sev = str(item.get("severity", "unknown")).title()
+                status = str(item.get("status", "ongoing")).title()
+                lines.append(f"- `{alert_id}` `{sev}` `{status}` — {self.b9_safe(title, 120)}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Open todos:**"])
+
+        todos = ops_state.get("todos") or {}
+        open_todos = [(k, v) for k, v in todos.items() if str(v.get("status", "open")).lower() != "done"]
+
+        if open_todos:
+            for key, item in open_todos[:8]:
+                lines.append(f"- `{key}` — {item.get('task')}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    def b9_actions_lines(self, snapshot: dict) -> list[str]:
+        readiness = snapshot.get("prod_readiness") or {}
+        security = snapshot.get("security") or {}
+        incidents = snapshot.get("incidents") or {}
+        alerts = snapshot.get("alerts") or {}
+        ops_state = snapshot.get("ops_state") or {}
+
+        actions = []
+
+        blockers = readiness.get("blockers") or []
+        warnings = readiness.get("warnings") or []
+
+        for blocker in blockers:
+            actions.append(f"Resolve production blocker: {blocker}")
+
+        if incidents.get("active_critical_high", 0):
+            actions.append("Review active critical/high incidents before any release.")
+            actions.append("Run `!mcore incident active` and update/resolve incidents as appropriate.")
+
+        if alerts.get("open", 0):
+            actions.append("Review open alerts and confirm whether they are expected/current.")
+            actions.append("Run `!mcore alerts ops` and `!mcore alerts overdue`.")
+
+        if security.get("secret_events", 0):
+            actions.append("Confirm secret/token/webhook changes were expected and no values were exposed.")
+
+        if security.get("highrisk_events", 0):
+            actions.append("Run `!mcore logs executive` and document high-risk audit evidence.")
+
+        for warning in warnings:
+            actions.append(f"Review warning: {warning}")
+
+        todos = ops_state.get("todos") or {}
+        open_todos = [(k, v) for k, v in todos.items() if str(v.get("status", "open")).lower() != "done"]
+
+        for key, item in open_todos[:10]:
+            actions.append(f"Todo `{key}`: {item.get('task')}")
+
+        seen = set()
+        unique = []
+
+        for action in actions:
+            if action not in seen:
+                seen.add(action)
+                unique.append(action)
+
+        if not unique:
+            unique.append("No immediate ops actions detected. Continue monitoring.")
+
+        lines = [
+            "**Recommended Operations Actions**",
+            "",
+        ]
+
+        for idx, action in enumerate(unique[:25], start=1):
+            lines.append(f"{idx}. {action}")
+
+        return lines
+
+    def b9_handover_lines(self, snapshot: dict) -> list[str]:
+        ops_state = snapshot.get("ops_state") or {}
+        notes = ops_state.get("handover_notes") or []
+
+        lines = [
+            "**Operations Handover**",
+            "",
+        ]
+
+        lines.extend(self.b9_brief_lines(snapshot))
+        lines.extend(["", "**Recommended actions:**"])
+        for line in self.b9_actions_lines(snapshot)[2:12]:
+            lines.append(line)
+
+        lines.extend(["", "**Watchlist:**"])
+        watchlist = ops_state.get("watchlist") or {}
+
+        if watchlist:
+            for key, item in list(watchlist.items())[:10]:
+                lines.append(f"- `{key}` **{item.get('name')}** — {item.get('check')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Handover notes:**"])
+
+        if notes:
+            for note in notes[-10:]:
+                lines.append(f"- `{note.get('at')}` by `{note.get('by')}` — {note.get('note')}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    def b9_report_text(self, snapshot: dict) -> str:
+        sections = []
+        sections.extend(["Mattis CMS | Systems", "Unified Operations Report", "=" * 40, ""])
+        sections.extend([x.replace("**", "") for x in self.b9_dashboard_lines(snapshot)])
+        sections.extend(["", "Operations Brief", "-" * 40])
+        sections.extend([x.replace("**", "") for x in self.b9_brief_lines(snapshot)])
+        sections.extend(["", "Recommended Actions", "-" * 40])
+        sections.extend([x.replace("**", "") for x in self.b9_actions_lines(snapshot)])
+        sections.extend(["", "Handover", "-" * 40])
+        sections.extend([x.replace("**", "") for x in self.b9_handover_lines(snapshot)])
+        return "\n".join(sections)
+
+    @mcore.group(name="ops", invoke_without_command=True)
+    async def ops(self, ctx):
+        """Unified Mattis operations command centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Mattis Unified Operations Command Centre**",
+            "",
+            "`!mcore ops dashboard` — full unified dashboard",
+            "`!mcore ops brief` — short ops brief",
+            "`!mcore ops handover` — shift handover pack",
+            "`!mcore ops daily` — daily operational summary",
+            "`!mcore ops risks` — current risks",
+            "`!mcore ops actions` — recommended next actions",
+            "`!mcore ops todo` — list todos",
+            "`!mcore ops todo-add <task>` — add todo",
+            "`!mcore ops todo-done <id>` — complete todo",
+            "`!mcore ops todo-clear` — clear completed todos",
+            "`!mcore ops watch` — list watchlist",
+            "`!mcore ops watch-add <name> | <check/action>` — add watch item",
+            "`!mcore ops watch-remove <id>` — remove watch item",
+            "`!mcore ops war-room` — active incident war-room view",
+            "`!mcore ops status` — customer/internal status pack",
+            "`!mcore ops export` — export operations report",
+        ]
+
+        await self.send_paginated(ctx, "Operations Command", lines)
+
+    @ops.command(name="dashboard")
+    async def ops_dashboard(self, ctx):
+        """Show unified operations dashboard."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        await self.send_paginated(ctx, "Operations Dashboard", self.b9_dashboard_lines(snapshot))
+
+    @ops.command(name="brief")
+    async def ops_brief(self, ctx):
+        """Show short operations brief."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        await self.send_paginated(ctx, "Operations Brief", self.b9_brief_lines(snapshot))
+
+    @ops.command(name="handover")
+    async def ops_handover(self, ctx, *, note: str = ""):
+        """Show handover pack and optionally add a handover note."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b9_get_ops_state(ctx.guild)
+
+        if note:
+            notes = state.get("handover_notes") or []
+            notes.append({
+                "at": self.b9_now_iso(),
+                "by": str(ctx.author),
+                "note": self.b9_safe(note, 1200),
+            })
+            state["handover_notes"] = notes[-50:]
+            await self.b9_set_ops_state(ctx.guild, state)
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        await self.send_paginated(ctx, "Operations Handover", self.b9_handover_lines(snapshot))
+
+    @ops.command(name="daily")
+    async def ops_daily(self, ctx):
+        """Show daily operational summary."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+
+        lines = [
+            "**Daily Operations Summary**",
+            "",
+        ]
+
+        lines.extend(self.b9_dashboard_lines(snapshot))
+        lines.extend(["", "**Today’s recommended actions:**"])
+        lines.extend(self.b9_actions_lines(snapshot)[2:20])
+
+        await self.send_paginated(ctx, "Daily Operations Summary", lines)
+
+    @ops.command(name="risks")
+    async def ops_risks(self, ctx):
+        """Show current operations risks."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        readiness = snapshot.get("prod_readiness") or {}
+        incidents = snapshot.get("incidents") or {}
+        security = snapshot.get("security") or {}
+
+        lines = [
+            "**Current Operations Risks**",
+            "",
+            f"Production readiness: `{readiness.get('label', 'Unknown')}`",
+            f"Score: `{readiness.get('score', 'Unknown')}/100`",
+            "",
+            "**Blockers:**",
+        ]
+
+        blockers = readiness.get("blockers") or []
+
+        if blockers:
+            for blocker in blockers:
+                lines.append(f"- 🚫 {blocker}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Risk notes:**"])
+        lines.append(f"- Active incidents: `{incidents.get('open', 0)}`")
+        lines.append(f"- Active critical/high incidents: `{incidents.get('active_critical_high', 0)}`")
+        lines.append(f"- High-risk audit events: `{security.get('highrisk_events', 0)}`")
+        lines.append(f"- Secret/token/webhook events: `{security.get('secret_events', 0)}`")
+        lines.append("- Confirm backup/restore checks are not only theoretical.")
+        lines.append("- Confirm release freeze is enabled if production risk is unacceptable.")
+
+        await self.send_paginated(ctx, "Operations Risks", lines)
+
+    @ops.command(name="actions")
+    async def ops_actions(self, ctx):
+        """Show recommended operations actions."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        await self.send_paginated(ctx, "Operations Actions", self.b9_actions_lines(snapshot))
+
+    @ops.command(name="todo")
+    async def ops_todo(self, ctx):
+        """List ops todos."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b9_get_ops_state(ctx.guild)
+        todos = state.get("todos") or {}
+
+        if not todos:
+            await ctx.send(embed=info_embed("Ops Todo", "No ops todos yet."))
+            return
+
+        lines = []
+
+        for key, item in sorted(todos.items()):
+            emoji = "✅" if item.get("status") == "done" else "☐"
+            lines.append(f"{emoji} `{key}` — {item.get('task')} — `{item.get('status', 'open')}`")
+
+        await self.send_paginated(ctx, "Ops Todo", lines)
+
+    @ops.command(name="todo-add")
+    async def ops_todo_add(self, ctx, *, task: str):
+        """Add ops todo."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b9_get_ops_state(ctx.guild)
+        state["todo_counter"] = int(state.get("todo_counter", 0) or 0) + 1
+        key = f"T-{state['todo_counter']:04d}"
+
+        state.setdefault("todos", {})[key] = {
+            "id": key,
+            "task": self.b9_safe(task, 800),
+            "status": "open",
+            "created_at": self.b9_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b9_set_ops_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Ops todo added", f"`{key}` — {task}"))
+
+    @ops.command(name="todo-done")
+    async def ops_todo_done(self, ctx, todo_id: str):
+        """Mark ops todo done."""
+        if not await require_admin(ctx):
+            return
+
+        todo_id = str(todo_id or "").upper()
+        state = await self.b9_get_ops_state(ctx.guild)
+        todos = state.get("todos") or {}
+
+        if todo_id not in todos:
+            await ctx.send(embed=info_embed("Todo not found", f"No todo matched `{todo_id}`."))
+            return
+
+        todos[todo_id]["status"] = "done"
+        todos[todo_id]["completed_at"] = self.b9_now_iso()
+        todos[todo_id]["completed_by"] = str(ctx.author)
+
+        state["todos"] = todos
+        await self.b9_set_ops_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Ops todo completed", f"`{todo_id}` marked done."))
+
+    @ops.command(name="todo-clear")
+    async def ops_todo_clear(self, ctx):
+        """Clear completed ops todos."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b9_get_ops_state(ctx.guild)
+        todos = state.get("todos") or {}
+
+        before = len(todos)
+        todos = {k: v for k, v in todos.items() if v.get("status") != "done"}
+        removed = before - len(todos)
+
+        state["todos"] = todos
+        await self.b9_set_ops_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Completed todos cleared", f"Removed `{removed}` completed todo(s)."))
+
+    @ops.command(name="watch")
+    async def ops_watch(self, ctx):
+        """List ops watchlist."""
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b9_get_ops_state(ctx.guild)
+        watchlist = state.get("watchlist") or {}
+
+        if not watchlist:
+            await ctx.send(embed=info_embed("Ops Watchlist", "No watchlist items yet."))
+            return
+
+        lines = []
+
+        for key, item in sorted(watchlist.items()):
+            lines.extend([
+                f"**{key} — {item.get('name')}**",
+                f"Check/action: {item.get('check')}",
+                f"Added by: `{item.get('created_by')}`",
+                f"Added at: `{item.get('created_at')}`",
+                f"Remove: `!mcore ops watch-remove {key}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Ops Watchlist", lines)
+
+    @ops.command(name="watch-add")
+    async def ops_watch_add(self, ctx, *, text: str):
+        """Add ops watchlist item. Use: name | check/action."""
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            name, check = [x.strip() for x in text.split("|", 1)]
+        else:
+            name = text.strip()
+            check = "Monitor and review manually."
+
+        state = await self.b9_get_ops_state(ctx.guild)
+        state["watch_counter"] = int(state.get("watch_counter", 0) or 0) + 1
+        key = f"W-{state['watch_counter']:04d}"
+
+        state.setdefault("watchlist", {})[key] = {
+            "id": key,
+            "name": self.b9_safe(name, 200),
+            "check": self.b9_safe(check, 800),
+            "created_at": self.b9_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b9_set_ops_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Watchlist item added", f"`{key}` — {name}"))
+
+    @ops.command(name="watch-remove")
+    async def ops_watch_remove(self, ctx, watch_id: str):
+        """Remove watchlist item."""
+        if not await require_admin(ctx):
+            return
+
+        watch_id = str(watch_id or "").upper()
+        state = await self.b9_get_ops_state(ctx.guild)
+        watchlist = state.get("watchlist") or {}
+
+        if watch_id not in watchlist:
+            await ctx.send(embed=info_embed("Watch item not found", f"No watch item matched `{watch_id}`."))
+            return
+
+        item = watchlist.pop(watch_id)
+        state["watchlist"] = watchlist
+
+        await self.b9_set_ops_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Watchlist item removed", f"`{watch_id}` — {item.get('name')}"))
+
+    @ops.command(name="war-room")
+    async def ops_war_room(self, ctx):
+        """Show active incident war-room view."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        incidents = snapshot.get("incidents") or {}
+        items = incidents.get("items") or []
+
+        lines = [
+            "**Incident War Room**",
+            "",
+            f"Active incidents: `{incidents.get('open', 0)}`",
+            f"Active critical/high: `{incidents.get('active_critical_high', 0)}`",
+            "",
+        ]
+
+        if not items:
+            lines.append("✅ No active incidents.")
+        else:
+            for incident_id, inc in items[:10]:
+                if hasattr(self, "b8_status_card_lines"):
+                    lines.extend(self.b8_status_card_lines(incident_id, inc))
+                else:
+                    lines.extend(self.b7_incident_summary_lines(incident_id, inc))
+                lines.append("")
+
+        await self.send_paginated(ctx, "Incident War Room", lines)
+
+    @ops.command(name="status")
+    async def ops_status(self, ctx):
+        """Show overall status text pack."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        readiness = snapshot.get("prod_readiness") or {}
+        incidents = snapshot.get("incidents") or {}
+        security = snapshot.get("security") or {}
+
+        lines = [
+            "**Operations Status Pack**",
+            "",
+            "**Internal status:**",
+            f"Production readiness is `{readiness.get('label', 'Unknown')}` with score `{readiness.get('score', 'Unknown')}/100`. Active incidents: `{incidents.get('open', 0)}`. Active critical/high incidents: `{incidents.get('active_critical_high', 0)}`. High-risk audit events: `{security.get('highrisk_events', 0)}`.",
+            "",
+            "**Customer-safe status:**",
+            "The service is being monitored. Any confirmed customer-facing issue will be communicated with clear impact and resolution updates.",
+            "",
+            "**Release status:**",
+            "Run `!mcore prod preflight <release>` before releasing. Active critical/high incidents should block production release unless explicitly accepted.",
+        ]
+
+        await self.send_paginated(ctx, "Operations Status", lines)
+
+    @ops.command(name="export")
+    async def ops_export(self, ctx):
+        """Export unified operations report."""
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        report = self.b9_report_text(snapshot)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Operations report exported", "Exported unified operations report."),
+            file=discord.File(fp, filename="mattis-unified-operations-report.txt")
+        )
+
     @mcore.group(name="incident", invoke_without_command=True)
     async def incident(self, ctx):
         """Incident command centre."""
