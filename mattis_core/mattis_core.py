@@ -619,6 +619,7 @@ class MattisCore(commands.Cog):
         }
 
 
+
     def b5_score_readiness(self, checks: list[dict], security: dict, prod_state: dict) -> dict:
         summary = self.b5_endpoint_summary(checks)
 
@@ -638,14 +639,22 @@ class MattisCore(commands.Cog):
         secret_events = int(security.get("secret_events", 0) or 0)
         active_incidents = int(security.get("active_incidents", 0) or 0)
         active_critical_high = int(security.get("active_critical_high_incidents", 0) or 0)
+        blocking_critical_high = int(security.get("blocking_critical_high_incidents", active_critical_high) or 0)
+        accepted_critical_high = int(security.get("accepted_critical_high_incidents", 0) or 0)
 
-        if active_critical_high:
-            score -= min(35, active_critical_high * 15)
-            blockers.append(f"{active_critical_high} active critical/high incident(s) are open.")
+        if blocking_critical_high:
+            score -= min(35, blocking_critical_high * 15)
+            blockers.append(f"{blocking_critical_high} active critical/high incident(s) are open and not release-approved/accepted.")
 
-        elif active_incidents:
-            score -= min(10, active_incidents * 3)
-            warnings.append(f"{active_incidents} active incident(s) are open.")
+        if accepted_critical_high:
+            score -= min(12, accepted_critical_high * 4)
+            warnings.append(f"{accepted_critical_high} active critical/high incident(s) are risk-accepted or release-approved.")
+
+        medium_low_active = max(0, active_incidents - active_critical_high)
+
+        if medium_low_active:
+            score -= min(10, medium_low_active * 3)
+            warnings.append(f"{medium_low_active} active medium/low incident(s) are open.")
 
         if highrisk_count >= 20:
             score -= 10
@@ -684,6 +693,9 @@ class MattisCore(commands.Cog):
             "top_reasons": [],
             "active_incidents": 0,
             "active_critical_high_incidents": 0,
+            "blocking_critical_high_incidents": 0,
+            "accepted_critical_high_incidents": 0,
+            "release_approved_incidents": 0,
         }
 
         try:
@@ -691,6 +703,9 @@ class MattisCore(commands.Cog):
                 inc_summary = await self.b8_active_incident_summary(guild)
                 result["active_incidents"] = int(inc_summary.get("open", 0) or 0)
                 result["active_critical_high_incidents"] = int(inc_summary.get("active_critical_high", 0) or 0)
+                result["blocking_critical_high_incidents"] = int(inc_summary.get("blocking_critical_high", result["active_critical_high_incidents"]) or 0)
+                result["accepted_critical_high_incidents"] = int(inc_summary.get("accepted_critical_high", 0) or 0)
+                result["release_approved_incidents"] = int(inc_summary.get("release_approved", 0) or 0)
 
             if not hasattr(self, "b4a_fetch_highrisk_events"):
                 return result
@@ -1461,6 +1476,7 @@ class MattisCore(commands.Cog):
 
         return counts
 
+
     async def b8_active_incident_summary(self, guild) -> dict:
         if not hasattr(self, "b7_get_incident_state"):
             return {
@@ -1472,12 +1488,19 @@ class MattisCore(commands.Cog):
                 "medium": 0,
                 "low": 0,
                 "active_critical_high": 0,
+                "blocking_critical_high": 0,
+                "accepted_critical_high": 0,
+                "release_approved": 0,
                 "items": [],
             }
 
         state = await self.b7_get_incident_state(guild)
         incidents = state.get("incidents") or {}
         counts = self.b8_incident_counts(incidents)
+
+        if hasattr(self, "b10_active_incident_blocking_counts"):
+            counts.update(self.b10_active_incident_blocking_counts(incidents))
+            counts["total"] = len(incidents)
 
         active = [(k, v) for k, v in incidents.items() if str(v.get("status", "open")).lower() != "resolved"]
 
@@ -2072,6 +2095,25 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Operations Command", lines)
 
+
+    @ops.command(name="closeout")
+    async def ops_closeout(self, ctx):
+        """Show operations closeout view."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        await self.send_paginated(ctx, "Operations Closeout", self.b10_ops_closeout_lines(snapshot))
+
+    @ops.command(name="release-view")
+    async def ops_release_view(self, ctx):
+        """Show release view with incident blocking/accepted state."""
+        if not await require_admin(ctx):
+            return
+
+        snapshot = await self.b9_build_ops_snapshot(ctx.guild)
+        await self.send_paginated(ctx, "Release View", self.b10_release_view_lines(snapshot))
+
     @ops.command(name="dashboard")
     async def ops_dashboard(self, ctx):
         """Show unified operations dashboard."""
@@ -2408,6 +2450,318 @@ class MattisCore(commands.Cog):
             file=discord.File(fp, filename="mattis-unified-operations-report.txt")
         )
 
+
+    def b10_incident_release_accepted(self, inc: dict) -> bool:
+        if not inc:
+            return False
+
+        if inc.get("risk_accepted"):
+            return True
+
+        if inc.get("release_approved"):
+            return True
+
+        if str(inc.get("status", "")).lower() == "resolved":
+            return True
+
+        return False
+
+    def b10_active_incident_blocking_counts(self, incidents: dict) -> dict:
+        counts = {
+            "open": 0,
+            "active_critical_high": 0,
+            "blocking_critical_high": 0,
+            "accepted_critical_high": 0,
+            "release_approved": 0,
+        }
+
+        for _, inc in (incidents or {}).items():
+            status = str(inc.get("status", "open")).lower()
+            sev = self.b7_severity_normalise(inc.get("severity", "medium"))
+
+            if status == "resolved":
+                continue
+
+            counts["open"] += 1
+
+            if sev in ["critical", "high"]:
+                counts["active_critical_high"] += 1
+
+                if self.b10_incident_release_accepted(inc):
+                    counts["accepted_critical_high"] += 1
+                else:
+                    counts["blocking_critical_high"] += 1
+
+            if inc.get("release_approved"):
+                counts["release_approved"] += 1
+
+        return counts
+
+    def b10_merge_unique_list(self, a, b):
+        result = []
+        seen = set()
+
+        for item in list(a or []) + list(b or []):
+            marker = str(item)
+            if marker not in seen:
+                seen.add(marker)
+                result.append(item)
+
+        return result
+
+    def b10_merge_incident_data(self, primary: dict, duplicate: dict, duplicate_id: str, reason: str, actor: str) -> dict:
+        primary = dict(primary or {})
+        duplicate = dict(duplicate or {})
+
+        primary.setdefault("merged_incidents", [])
+        primary["merged_incidents"] = self.b10_merge_unique_list(primary.get("merged_incidents"), [duplicate_id] + list(duplicate.get("merged_incidents") or []))
+
+        # Preserve links/evidence.
+        for field in ["linked_alert", "linked_log_query", "linked_log_base_id"]:
+            if not primary.get(field) and duplicate.get(field):
+                primary[field] = duplicate.get(field)
+
+        if duplicate.get("linked_log_related_count") and not primary.get("linked_log_related_count"):
+            primary["linked_log_related_count"] = duplicate.get("linked_log_related_count")
+
+        # Preserve richer impact/status fields where primary lacks them.
+        for field in ["customer_impact", "internal_impact", "next_action", "resolution", "commander"]:
+            if not primary.get(field) and duplicate.get(field):
+                primary[field] = duplicate.get(field)
+
+        if not primary.get("impact") or primary.get("impact") == "Impact not documented yet.":
+            if duplicate.get("impact"):
+                primary["impact"] = duplicate.get("impact")
+
+        if not primary.get("current_status") or "not been updated" in str(primary.get("current_status", "")).lower():
+            if duplicate.get("current_status"):
+                primary["current_status"] = duplicate.get("current_status")
+
+        if primary.get("owner") in [None, "", "Unassigned"] and duplicate.get("owner"):
+            primary["owner"] = duplicate.get("owner")
+
+        # Take highest severity.
+        order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        psev = self.b7_severity_normalise(primary.get("severity"))
+        dsev = self.b7_severity_normalise(duplicate.get("severity"))
+
+        if order.get(dsev, 9) < order.get(psev, 9):
+            primary["severity"] = dsev
+
+        # Merge timelines.
+        primary_timeline = primary.get("timeline") or []
+        duplicate_timeline = duplicate.get("timeline") or []
+
+        primary["timeline"] = self.b10_merge_unique_list(primary_timeline, duplicate_timeline)[-150:]
+        primary = self.b7_add_timeline(primary, "merged_incident", actor, f"Merged duplicate {duplicate_id}: {reason}")
+
+        return primary
+
+    def b10_signoff_lines(self, incident_id: str, inc: dict) -> list[str]:
+        signoffs = inc.get("signoffs") or {}
+
+        lines = [
+            f"**Sign-offs for `{incident_id}`**",
+            "",
+        ]
+
+        if not signoffs:
+            lines.append("No sign-offs recorded.")
+        else:
+            for area, item in signoffs.items():
+                lines.extend([
+                    f"**{area}**",
+                    f"By: `{item.get('by')}`",
+                    f"At: `{item.get('at')}`",
+                    f"Note: {item.get('note')}",
+                    "",
+                ])
+
+        required = self.b10_required_signoff_areas(inc)
+
+        lines.extend([
+            "",
+            "**Required/recommended sign-offs:**",
+        ])
+
+        for area in required:
+            lines.append(f"{'✅' if area in signoffs else '☐'} {area}")
+
+        return lines
+
+    def b10_required_signoff_areas(self, inc: dict) -> list[str]:
+        areas = set(["Ops"])
+
+        text = " ".join([
+            str(inc.get("title", "")),
+            str(inc.get("impact", "")),
+            str(inc.get("customer_impact", "")),
+            str(inc.get("internal_impact", "")),
+            str(inc.get("current_status", "")),
+            str(inc.get("linked_log_query", "")),
+        ]).lower()
+
+        if any(x in text for x in ["stripe", "billing", "invoice", "webhook"]):
+            areas.add("Billing")
+        if any(x in text for x in ["roblox", "open cloud"]):
+            areas.add("Roblox")
+        if any(x in text for x in ["discord", "oauth", "bot"]):
+            areas.add("Discord")
+        if any(x in text for x in ["secret", "token", "key", "webhook"]):
+            areas.add("Security")
+        if "customer" in text or "billing" in text or "roblox" in text:
+            areas.add("Customer Impact")
+
+        return sorted(areas)
+
+    def b10_governance_lines(self, incident_id: str, inc: dict) -> list[str]:
+        sev = self.b7_severity_normalise(inc.get("severity"))
+        status = str(inc.get("status", "open")).lower()
+        release_state = "Approved" if inc.get("release_approved") else "Blocked" if sev in ["critical", "high"] and status != "resolved" and not self.b10_incident_release_accepted(inc) else "Not blocking"
+
+        lines = [
+            f"**Governance for `{incident_id}`**",
+            "",
+            f"Severity: `{sev.title()}`",
+            f"Status: `{status.title()}`",
+            f"Risk accepted: `{'yes' if inc.get('risk_accepted') else 'no'}`",
+            f"Risk accepted by: `{inc.get('risk_accepted_by') or 'N/A'}`",
+            f"Risk reason: {inc.get('risk_accepted_reason') or 'N/A'}",
+            f"Release approved: `{'yes' if inc.get('release_approved') else 'no'}`",
+            f"Release approved by: `{inc.get('release_approved_by') or 'N/A'}`",
+            f"Release state: `{release_state}`",
+            f"Expected/known: `{'yes' if inc.get('expected_activity') else 'no'}`",
+            f"Expected reason: {inc.get('expected_reason') or 'N/A'}",
+            "",
+        ]
+
+        lines.extend(self.b10_signoff_lines(incident_id, inc))
+
+        return lines
+
+    async def b10_incident_evidence_lines(self, guild, incident_id: str, inc: dict) -> list[str]:
+        lines = [
+            f"**Evidence for `{incident_id}`**",
+            "",
+        ]
+
+        if inc.get("linked_alert"):
+            alert_key = inc.get("linked_alert")
+            lines.append(f"Linked alert: `{alert_key}`")
+
+            if hasattr(self, "b3b_find_alert"):
+                try:
+                    found_key, alert_item = await self.b3b_find_alert(guild, alert_key)
+                    if alert_item:
+                        lines.extend([
+                            f"Alert title: {alert_item.get('title') or found_key}",
+                            f"Alert severity: `{alert_item.get('severity', 'unknown')}`",
+                            f"Alert status: `{alert_item.get('status', 'unknown')}`",
+                            f"Alert count: `{alert_item.get('count', '?')}`",
+                        ])
+                except Exception as e:
+                    lines.append(f"Could not load alert evidence: `{type(e).__name__}: {e}`")
+
+            lines.append("")
+
+        if inc.get("linked_log_query"):
+            query = inc.get("linked_log_query")
+            lines.append(f"Linked log query: `{query}`")
+
+            if hasattr(self, "b4a_fetch_highrisk_events") and hasattr(self, "b4mega_get_related_events"):
+                try:
+                    data = await self.b4a_fetch_highrisk_events(guild)
+                    events = data.get("events") or []
+                    base, related = self.b4mega_get_related_events(events, query, limit=10)
+
+                    if base:
+                        c = self.b4a_classify_log_event(base)
+                        lines.extend([
+                            f"Base event: `{c.get('id') or 'Unknown'}`",
+                            f"Base reason: {c.get('reason')}",
+                            f"Base action: `{c.get('action')}`",
+                            f"Base category: `{c.get('category')}`",
+                            f"Related events: `{len(related)}`",
+                            "",
+                            "**Related evidence:**",
+                        ])
+
+                        for event in related[:8]:
+                            rc = self.b4a_classify_log_event(event)
+                            lines.append(f"- `{rc.get('id') or 'Unknown'}` — `{rc.get('category')}` — {rc.get('reason')}")
+                    else:
+                        lines.append("No matching log evidence found.")
+                except Exception as e:
+                    lines.append(f"Could not load log evidence: `{type(e).__name__}: {e}`")
+
+        if not inc.get("linked_alert") and not inc.get("linked_log_query"):
+            lines.append("No linked alert or log evidence.")
+
+        return lines
+
+    def b10_ops_closeout_lines(self, snapshot: dict) -> list[str]:
+        incidents = snapshot.get("incidents") or {}
+        alerts = snapshot.get("alerts") or {}
+        security = snapshot.get("security") or {}
+        readiness = snapshot.get("prod_readiness") or {}
+
+        lines = [
+            "**Operations Closeout View**",
+            "",
+            f"Production readiness: `{readiness.get('label', 'Unknown')}`",
+            f"Score: `{readiness.get('score', 'Unknown')}/100`",
+            f"Active incidents: `{incidents.get('open', 0)}`",
+            f"Active critical/high: `{incidents.get('active_critical_high', 0)}`",
+            f"Open alerts: `{alerts.get('open', 0)}`",
+            f"High-risk audit events: `{security.get('highrisk_events', 0)}`",
+            "",
+            "**Closeout steps:**",
+            "1. Merge duplicate incidents.",
+            "2. Add sign-offs for Billing/Security/Roblox/Discord as needed.",
+            "3. Mark expected activity where changes were planned.",
+            "4. Accept risk or release-approve only when genuinely safe.",
+            "5. Resolve incidents with clear resolution text.",
+            "6. Resolve linked alerts only after evidence is accepted.",
+            "7. Run `!mcore ops dashboard` and `!mcore prod preflight final-check`.",
+        ]
+
+        return lines
+
+    def b10_release_view_lines(self, snapshot: dict) -> list[str]:
+        readiness = snapshot.get("prod_readiness") or {}
+        incidents = snapshot.get("incidents") or {}
+        items = incidents.get("items") or []
+
+        lines = [
+            "**Release View**",
+            "",
+            f"Readiness: `{readiness.get('label', 'Unknown')}`",
+            f"Score: `{readiness.get('score', 'Unknown')}/100`",
+            "",
+            "**Active incidents:**",
+        ]
+
+        if not items:
+            lines.append("✅ No active incidents.")
+        else:
+            for incident_id, inc in items:
+                sev = self.b7_severity_normalise(inc.get("severity"))
+                status = str(inc.get("status", "open")).title()
+                accepted = self.b10_incident_release_accepted(inc)
+                release = "✅ accepted/approved" if accepted else "🚫 blocking" if sev in ["critical", "high"] else "⚠️ review"
+                lines.append(f"- `{incident_id}` `{sev.title()}` `{status}` — {release} — {inc.get('title')}")
+
+        lines.extend([
+            "",
+            "**Commands:**",
+            "`!mcore incident release-ok <id> <reason>`",
+            "`!mcore incident accept-risk <id> <reason>`",
+            "`!mcore incident clean-resolve <id> <resolution>`",
+            "`!mcore prod preflight release-name`",
+        ])
+
+        return lines
+
     @mcore.group(name="incident", invoke_without_command=True)
     async def incident(self, ctx):
         """Incident command centre."""
@@ -2438,6 +2792,268 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Incident Command", lines)
 
+
+
+    @incident.command(name="merge")
+    async def incident_merge(self, ctx, primary_query: str, duplicate_query: str, *, reason: str):
+        """Merge duplicate incident into primary incident."""
+        if not await require_admin(ctx):
+            return
+
+        primary_id, primary, state = await self.b7_find_incident(ctx.guild, primary_query)
+        duplicate_id, duplicate, _ = await self.b7_find_incident(ctx.guild, duplicate_query)
+
+        if not primary:
+            await ctx.send(embed=info_embed("Primary incident not found", f"No incident matched `{primary_query}`."))
+            return
+
+        if not duplicate:
+            await ctx.send(embed=info_embed("Duplicate incident not found", f"No incident matched `{duplicate_query}`."))
+            return
+
+        if primary_id == duplicate_id:
+            await ctx.send(embed=error_embed("Cannot merge", "Primary and duplicate are the same incident."))
+            return
+
+        merged = self.b10_merge_incident_data(primary, duplicate, duplicate_id, reason, self.b7_actor(ctx))
+
+        duplicate["status"] = "resolved"
+        duplicate["resolution"] = f"Merged into {primary_id}: {reason}"
+        duplicate["merged_into"] = primary_id
+        duplicate = self.b7_add_timeline(duplicate, "merged_into", self.b7_actor(ctx), f"Merged into {primary_id}: {reason}")
+
+        state["incidents"][primary_id] = merged
+        state["incidents"][duplicate_id] = duplicate
+
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incidents merged", f"`{duplicate_id}` merged into `{primary_id}`."))
+
+    @incident.command(name="accept-risk")
+    async def incident_accept_risk(self, ctx, query: str, *, reason: str):
+        """Accept operational risk for an active incident."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["risk_accepted"] = True
+        inc["risk_accepted_reason"] = self.b7_safe(reason, 1200)
+        inc["risk_accepted_by"] = str(ctx.author)
+        inc["risk_accepted_at"] = self.b7_now_iso()
+        inc = self.b7_add_timeline(inc, "risk_accepted", self.b7_actor(ctx), reason)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident risk accepted", f"`{incident_id}` risk accepted. This will no longer hard-block readiness, but will remain a warning."))
+
+    @incident.command(name="unaccept-risk")
+    async def incident_unaccept_risk(self, ctx, query: str, *, reason: str = "Risk acceptance removed."):
+        """Remove risk acceptance from incident."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["risk_accepted"] = False
+        inc["risk_unaccepted_by"] = str(ctx.author)
+        inc["risk_unaccepted_at"] = self.b7_now_iso()
+        inc = self.b7_add_timeline(inc, "risk_acceptance_removed", self.b7_actor(ctx), reason)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Risk acceptance removed", f"`{incident_id}` will block release again if critical/high and unresolved."))
+
+    @incident.command(name="release-ok")
+    async def incident_release_ok(self, ctx, query: str, *, reason: str):
+        """Approve release despite an active incident."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["release_approved"] = True
+        inc["release_approved_reason"] = self.b7_safe(reason, 1200)
+        inc["release_approved_by"] = str(ctx.author)
+        inc["release_approved_at"] = self.b7_now_iso()
+        inc = self.b7_add_timeline(inc, "release_approved", self.b7_actor(ctx), reason)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Release approved for incident", f"`{incident_id}` will not hard-block release readiness."))
+
+    @incident.command(name="release-block")
+    async def incident_release_block(self, ctx, query: str, *, reason: str):
+        """Remove release approval for an incident."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["release_approved"] = False
+        inc["release_blocked_by"] = str(ctx.author)
+        inc["release_blocked_at"] = self.b7_now_iso()
+        inc = self.b7_add_timeline(inc, "release_approval_removed", self.b7_actor(ctx), reason)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Release approval removed", f"`{incident_id}` will block release again if critical/high and unresolved."))
+
+    @incident.command(name="signoff")
+    async def incident_signoff(self, ctx, query: str, area: str, *, note: str):
+        """Add area sign-off to incident."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        area = self.b7_safe(area.title(), 80)
+        signoffs = inc.get("signoffs") or {}
+
+        signoffs[area] = {
+            "by": str(ctx.author),
+            "by_id": getattr(ctx.author, "id", None),
+            "at": self.b7_now_iso(),
+            "note": self.b7_safe(note, 1200),
+        }
+
+        inc["signoffs"] = signoffs
+        inc = self.b7_add_timeline(inc, "signoff_added", self.b7_actor(ctx), f"{area}: {note}")
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident sign-off added", f"`{incident_id}` sign-off added for `{area}`."))
+
+    @incident.command(name="signoffs")
+    async def incident_signoffs(self, ctx, *, query: str):
+        """Show incident sign-offs."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Incident Sign-offs", self.b10_signoff_lines(incident_id, inc))
+
+    @incident.command(name="expected")
+    async def incident_expected(self, ctx, query: str, *, reason: str):
+        """Mark incident as expected/planned activity."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["expected_activity"] = True
+        inc["expected_reason"] = self.b7_safe(reason, 1200)
+        inc["expected_by"] = str(ctx.author)
+        inc["expected_at"] = self.b7_now_iso()
+        inc = self.b7_add_timeline(inc, "marked_expected", self.b7_actor(ctx), reason)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Incident marked expected", f"`{incident_id}` marked as expected/planned activity."))
+
+    @incident.command(name="evidence")
+    async def incident_evidence(self, ctx, *, query: str):
+        """Show linked incident evidence from alerts/logs."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        lines = await self.b10_incident_evidence_lines(ctx.guild, incident_id, inc)
+        await self.send_paginated(ctx, "Incident Evidence", lines)
+
+    @incident.command(name="governance")
+    async def incident_governance(self, ctx, *, query: str):
+        """Show incident governance/release state."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Incident Governance", self.b10_governance_lines(incident_id, inc))
+
+    @incident.command(name="clean-resolve")
+    async def incident_clean_resolve(self, ctx, query: str, *, resolution: str):
+        """Resolve incident cleanly with governance timeline note."""
+        if not await require_admin(ctx):
+            return
+
+        incident_id, inc, state = await self.b7_find_incident(ctx.guild, query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{query}`."))
+            return
+
+        inc["status"] = "resolved"
+        inc["resolution"] = self.b7_safe(resolution, 1600)
+        inc["resolved_at"] = self.b7_now_iso()
+        inc["resolved_by"] = str(ctx.author)
+        inc["risk_accepted"] = False
+        inc["release_approved"] = False
+        inc = self.b7_add_timeline(inc, "clean_resolved", self.b7_actor(ctx), resolution)
+
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        # Add ops handover note if available.
+        if hasattr(self, "b9_get_ops_state") and hasattr(self, "b9_set_ops_state"):
+            try:
+                ops_state = await self.b9_get_ops_state(ctx.guild)
+                notes = ops_state.get("handover_notes") or []
+                notes.append({
+                    "at": self.b7_now_iso(),
+                    "by": str(ctx.author),
+                    "note": f"{incident_id} resolved: {resolution}",
+                })
+                ops_state["handover_notes"] = notes[-50:]
+                await self.b9_set_ops_state(ctx.guild, ops_state)
+            except Exception:
+                pass
+
+        await self.send_paginated(ctx, "Incident Clean Resolved", self.b7_incident_summary_lines(incident_id, inc))
 
     @incident.command(name="active")
     async def incident_active(self, ctx):
