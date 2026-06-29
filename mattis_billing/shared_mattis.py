@@ -576,14 +576,12 @@ async def member_has_capability(ctx, *capabilities: str) -> bool:
 
 
 async def member_is_core_admin(ctx) -> bool:
+    # Redbot owner keeps emergency access. Everyone else must have the explicit core_admin capability.
     if await ctx.bot.is_owner(ctx.author):
         return True
 
     if not ctx.guild:
         return False
-
-    if getattr(ctx.author.guild_permissions, "administrator", False):
-        return True
 
     return await member_has_capability(ctx, "core_admin")
 

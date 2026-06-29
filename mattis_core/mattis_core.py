@@ -4204,99 +4204,180 @@ class MattisCore(commands.Cog):
             {
                 "family": "core",
                 "name": "Core Config / Dangerous Settings",
-                "commands": "!mcore apiurl, token, routes, autoroute, logs, alerts, notify, eventlogs",
-                "allowed": "Founder/Admin, Administration Team, Discord Administrator",
-                "notes": "Controls routing, tokens, logs, alerts, and permissions. Keep locked down.",
+                "commands": "!mcore config, token, routes, autoroute, logs, alerts, notify, eventlogs, capabilities",
+                "capabilities": ["core_admin"],
+                "notes": "Full bot configuration. Founder/Administrator only.",
             },
             {
                 "family": "management",
-                "name": "Management / Business Overview",
-                "commands": "management summaries, staff summaries, risk/customer overview",
-                "allowed": "Management, Administration Team, Founder/Admin",
-                "notes": "High-level business/customer visibility.",
+                "name": "Management Overview",
+                "commands": "management summaries, customer health, business overview",
+                "capabilities": ["management_view"],
+                "notes": "Directors/executives/founder only.",
+            },
+            {
+                "family": "finance",
+                "name": "Finance View",
+                "commands": "finance summaries, financial overview",
+                "capabilities": ["finance_view"],
+                "notes": "Director/executive finance visibility.",
             },
             {
                 "family": "support",
-                "name": "Support / CRM / Tickets",
-                "commands": "!msupport, !mcrm",
-                "allowed": "Support Team, Moderation & Support, Management, Administration Team",
-                "notes": "Customer and support workflow access.",
+                "name": "General Support",
+                "commands": "general support tickets/customer help",
+                "capabilities": ["general_support", "support_lead"],
+                "notes": "Support Agent and Support Lead only.",
+            },
+            {
+                "family": "support_lead",
+                "name": "Support Lead / Escalations",
+                "commands": "support escalations, assignment overview",
+                "capabilities": ["support_lead"],
+                "notes": "Support Lead only.",
             },
             {
                 "family": "billing",
-                "name": "Billing",
-                "commands": "!mbilling",
-                "allowed": "Billing Support, Management, Administration Team",
-                "notes": "Invoices, failed billing, past due, trials.",
+                "name": "Billing Support",
+                "commands": "billing, invoices, payments, refunds, chargebacks",
+                "capabilities": ["billing_support", "finance_view"],
+                "notes": "Billing Support or finance/management visibility.",
             },
             {
-                "family": "security",
-                "name": "Security / Audit",
-                "commands": "!msecurity, !maudit",
-                "allowed": "Security Admin, Security Support, Incident Response, Audit Reviewer, Senior Moderator, Management, Administration Team",
-                "notes": "Security risks, suspicious activity, audit events.",
+                "family": "technical_support",
+                "name": "Technical Support",
+                "commands": "API help, install help, troubleshooting, system errors support",
+                "capabilities": ["technical_support", "support_lead"],
+                "notes": "Technical Support and Support Lead only.",
             },
             {
-                "family": "development",
-                "name": "Development / Production",
-                "commands": "!mstatus, !mmodules, !mautomation, !mincident, !mdiscord, !mroblox",
-                "allowed": "Development Team, Administration Team, Management",
-                "notes": "Everything development/production related.",
+                "family": "security_support",
+                "name": "Security Support",
+                "commands": "security reports, suspicious activity, account compromise",
+                "capabilities": ["security_support", "security_admin"],
+                "notes": "Security Support or Security Admin only.",
             },
             {
-                "family": "staff",
-                "name": "General Staff / Workspace / Applications",
-                "commands": "!mworkspace, !mapps",
-                "allowed": "Support Team, Moderation & Support, Development Team, Management, Administration Team",
-                "notes": "General staff visibility.",
+                "family": "security_admin",
+                "name": "Security Admin",
+                "commands": "security admin checks and high-risk security visibility",
+                "capabilities": ["security_admin"],
+                "notes": "Security Admin only.",
+            },
+            {
+                "family": "incident",
+                "name": "Incident Response",
+                "commands": "incident checks, urgent security/production issues",
+                "capabilities": ["incident_response", "security_admin", "production_access", "management_view"],
+                "notes": "Incident Response, Security Admin, production owners, or management.",
+            },
+            {
+                "family": "audit",
+                "name": "Audit Review",
+                "commands": "audit logs, high-risk audit review",
+                "capabilities": ["audit_review", "security_admin", "management_view"],
+                "notes": "Audit Reviewer, Security Admin, or management.",
+            },
+            {
+                "family": "development_read",
+                "name": "Development Read",
+                "commands": "general development/status visibility",
+                "capabilities": ["development_read"],
+                "notes": "Developer, Lead Developer, QA Tester, Release Manager.",
+            },
+            {
+                "family": "backend",
+                "name": "Backend Access",
+                "commands": "backend/API/module checks",
+                "capabilities": ["backend_access"],
+                "notes": "Developer and Lead Developer.",
+            },
+            {
+                "family": "production",
+                "name": "Production Access",
+                "commands": "production diagnostics, system health, infrastructure",
+                "capabilities": ["production_access", "infrastructure_admin"],
+                "notes": "Lead Developer and Infrastructure Admin.",
+            },
+            {
+                "family": "release",
+                "name": "Release Manager",
+                "commands": "release engine, staging, release notes, production releases",
+                "capabilities": ["release_manager"],
+                "notes": "Release Manager only.",
+            },
+            {
+                "family": "qa",
+                "name": "QA / Testing",
+                "commands": "testing, QA, bug validation, staging checks",
+                "capabilities": ["qa_testing"],
+                "notes": "QA Tester only.",
+            },
+            {
+                "family": "design",
+                "name": "Design / Assets",
+                "commands": "design/assets/UI related checks",
+                "capabilities": ["design_access"],
+                "notes": "Designer only.",
+            },
+            {
+                "family": "discord_systems",
+                "name": "Discord Systems",
+                "commands": "Discord integration/system checks",
+                "capabilities": ["discord_systems", "infrastructure_admin"],
+                "notes": "Developer/Lead Developer/Infrastructure Admin.",
+            },
+            {
+                "family": "roblox_systems",
+                "name": "Roblox Systems",
+                "commands": "Roblox integration/system checks",
+                "capabilities": ["roblox_systems", "infrastructure_admin"],
+                "notes": "Developer/Lead Developer/Infrastructure Admin.",
+            },
+            {
+                "family": "automation",
+                "name": "Automation / Workers",
+                "commands": "automation, workers, failed runs",
+                "capabilities": ["automation_access", "infrastructure_admin"],
+                "notes": "Lead Developer or Infrastructure Admin.",
             },
         ]
 
-    def role_access_sections(self, guild: discord.Guild, role: discord.Role, sections: dict) -> list[str]:
+    def role_is_a_real_access_role(self, guild: discord.Guild, role: discord.Role) -> bool:
+        if role == guild.default_role:
+            return False
+
+        if role.managed:
+            return False
+
+        if role.name.lower().strip() in ["bots", "bot"]:
+            return False
+
+        if self.is_separator_role(role):
+            return False
+
+        return True
+
+    def role_has_capability(self, role: discord.Role, caps: dict[str, list[int]], capability: str) -> bool:
+        return role.id in [int(x) for x in caps.get(self.route_slug(capability), [])]
+
+    def role_capabilities(self, role: discord.Role, caps: dict[str, list[int]]) -> list[str]:
         found = []
 
-        for section, ids in sections.items():
-            if role.id in [int(x) for x in ids]:
-                found.append(section)
+        for cap in sorted(caps.keys()):
+            if self.role_has_capability(role, caps, cap):
+                found.append(cap)
 
         return found
 
-    def role_can_access_family(self, guild: discord.Guild, role: discord.Role, family: str, sections: dict) -> bool:
-        role_slug = self.route_slug(role.name)
-        section_slugs = [self.route_slug(x) for x in self.role_access_sections(guild, role, sections)]
-
-        is_founder = "founder" in role_slug or "owner" in role_slug
-        is_admin_role = role.permissions.administrator or "administrator" in role_slug or "admin" in role_slug
-        in_management = any("management" in x for x in section_slugs)
-        in_admin = any("administration" in x for x in section_slugs)
-        in_support = any("support" in x for x in section_slugs)
-        in_moderation = any("moderation" in x for x in section_slugs)
-        in_development = any("development" in x for x in section_slugs)
-
-        if is_founder or is_admin_role or in_admin:
+    def role_can_access_family(self, role: discord.Role, family_row: dict, caps: dict[str, list[int]]) -> bool:
+        # Explicit core_admin capability is the only full bot override.
+        if self.role_has_capability(role, caps, "core_admin"):
             return True
 
-        if family == "core":
-            return False
-
-        if family == "management":
-            return in_management
-
-        if family == "support":
-            return in_support or in_moderation or in_management
-
-        if family == "billing":
-            return "billing" in role_slug or in_management
-
-        if family == "security":
-            security_words = ["security", "incident", "audit", "seniormoderator", "moderator"]
-            return any(word in role_slug for word in security_words) or in_moderation or in_management
-
-        if family == "development":
-            return in_development or in_management
-
-        if family == "staff":
-            return in_support or in_moderation or in_development or in_management
+        for capability in family_row.get("capabilities", []):
+            if self.role_has_capability(role, caps, capability):
+                return True
 
         return False
 
@@ -4313,69 +4394,58 @@ class MattisCore(commands.Cog):
                 f"**{row['name']}**\n"
                 f"Family: `{row['family']}`\n"
                 f"Commands: `{row['commands']}`\n"
-                f"Allowed: {row['allowed']}\n"
+                f"Required capabilities: `{', '.join(row['capabilities'])}`\n"
                 f"Notes: {row['notes']}\n"
             )
 
-        await self.send_paginated(ctx, "Mattis Access Model", lines)
+        await self.send_paginated(ctx, "Mattis Capability Access Model", lines)
 
     @access.command(name="matrix")
     async def access_matrix(self, ctx):
-        """Show the command family access matrix."""
+        """Show role access based only on saved capabilities."""
         if not await require_admin(ctx):
             return
 
-        sections = await self.saved_sections(ctx.guild)
-        role_rows = []
+        caps = await self.saved_capabilities(ctx.guild)
+        lines = []
 
         for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
-            if role == ctx.guild.default_role or role.managed:
+            if not self.role_is_a_real_access_role(ctx.guild, role):
                 continue
 
             families = []
 
             for row in self.access_model():
-                if self.role_can_access_family(ctx.guild, role, row["family"], sections):
+                if self.role_can_access_family(role, row, caps):
                     families.append(row["family"])
 
             if families:
-                role_rows.append(f"{role.mention} → `{', '.join(families)}`")
+                lines.append(f"{role.mention} → `{', '.join(families)}`")
+            else:
+                lines.append(f"{role.mention} → `no bot access`")
 
         await self.send_paginated(
             ctx,
-            "Access Matrix",
-            role_rows,
+            "Capability Access Matrix",
+            lines,
             empty="No access roles detected.",
         )
 
-    @access.command(name="groups")
-    async def access_groups(self, ctx):
-        """Show saved role groups with expected access."""
+    @access.command(name="families")
+    async def access_families(self, ctx):
+        """List access families."""
         if not await require_admin(ctx):
             return
 
-        sections = await self.saved_sections(ctx.guild)
         lines = []
 
-        for section, ids in sections.items():
-            section_slug = self.route_slug(section)
+        for row in self.access_model():
+            lines.append(
+                f"`{row['family']}` — **{row['name']}**\n"
+                f"Requires: `{', '.join(row['capabilities'])}`"
+            )
 
-            if "management" in section_slug:
-                access = "management, support, billing, security, development, staff"
-            elif "administration" in section_slug:
-                access = "core, management, support, billing, security, development, staff"
-            elif "moderation" in section_slug:
-                access = "support, security, staff"
-            elif "support" in section_slug:
-                access = "support, staff, plus billing/security by specialist role"
-            elif "development" in section_slug:
-                access = "development, staff"
-            else:
-                access = "no automatic command access unless role name matches specialist access"
-
-            lines.append(f"**{section}** — `{len(ids)}` roles\nAccess: `{access}`")
-
-        await self.send_paginated(ctx, "Role Group Access", lines)
+        await self.send_paginated(ctx, "Access Families", lines)
 
     @access.command(name="family")
     async def access_family(self, ctx, family: str):
@@ -4384,20 +4454,23 @@ class MattisCore(commands.Cog):
             return
 
         family = self.route_slug(family)
-        valid = {row["family"]: row for row in self.access_model()}
+        rows = {row["family"]: row for row in self.access_model()}
 
-        if family not in valid:
+        if family not in rows:
             await ctx.send(embed=error_embed(
                 "Unknown family",
-                f"Use one of: `{', '.join(valid.keys())}`"
+                f"Use one of: `{', '.join(rows.keys())}`"
             ))
             return
 
-        sections = await self.saved_sections(ctx.guild)
+        caps = await self.saved_capabilities(ctx.guild)
+        row = rows[family]
+
         lines = [
             f"Family: `{family}`",
-            f"Name: **{valid[family]['name']}**",
-            f"Commands: `{valid[family]['commands']}`",
+            f"Name: **{row['name']}**",
+            f"Commands: `{row['commands']}`",
+            f"Required capabilities: `{', '.join(row['capabilities'])}`",
             "",
             "**Roles with access:**",
         ]
@@ -4405,10 +4478,10 @@ class MattisCore(commands.Cog):
         found = False
 
         for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
-            if role == ctx.guild.default_role or role.managed:
+            if not self.role_is_a_real_access_role(ctx.guild, role):
                 continue
 
-            if self.role_can_access_family(ctx.guild, role, family, sections):
+            if self.role_can_access_family(role, row, caps):
                 lines.append(f"• {role.mention}")
                 found = True
 
@@ -4423,313 +4496,25 @@ class MattisCore(commands.Cog):
         if not await require_admin(ctx):
             return
 
-        sections = await self.saved_sections(ctx.guild)
-        in_sections = self.role_access_sections(ctx.guild, role, sections)
+        caps = await self.saved_capabilities(ctx.guild)
+        role_caps = self.role_capabilities(role, caps)
 
         lines = [
             f"Role: {role.mention}",
             f"Position: `{role.position}`",
-            f"Discord Administrator: `{'yes' if role.permissions.administrator else 'no'}`",
-            f"Sections: `{', '.join(in_sections) if in_sections else 'none'}`",
+            f"Separator/header role: `{'yes' if self.is_separator_role(role) else 'no'}`",
             "",
-            "**Access:**",
+            "**Capabilities:**",
+            "`" + (", ".join(role_caps) if role_caps else "none") + "`",
+            "",
+            "**Access families:**",
         ]
 
         for row in self.access_model():
-            allowed = self.role_can_access_family(ctx.guild, role, row["family"], sections)
+            allowed = self.role_can_access_family(role, row, caps)
             lines.append(f"{'✅' if allowed else '❌'} `{row['family']}` — {row['name']}")
 
         await self.send_paginated(ctx, "Role Access Check", lines)
-
-
-    def capability_defaults(self) -> dict:
-        return {
-            "core_admin": ["founder", "administrator"],
-
-            "management_view": ["founder", "director", "executive"],
-            "finance_view": ["director", "executive"],
-
-            "general_support": ["support_agent", "support_lead"],
-            "support_lead": ["support_lead"],
-            "billing_support": ["billing_support"],
-            "technical_support": ["technical_support"],
-            "security_support": ["security_support"],
-
-            "moderation": ["moderator", "senior_moderator"],
-            "incident_response": ["incident_response"],
-            "audit_review": ["audit_reviewer"],
-
-            "security_admin": ["security_admin"],
-            "infrastructure_admin": ["infrastructure_admin"],
-
-            "development_read": ["developer", "lead_developer", "qa_tester", "release_manager"],
-            "backend_access": ["developer", "lead_developer"],
-            "production_access": ["lead_developer", "infrastructure_admin"],
-            "release_manager": ["release_manager"],
-            "qa_testing": ["qa_tester"],
-            "design_access": ["designer"],
-
-            "discord_systems": ["developer", "lead_developer", "infrastructure_admin"],
-            "roblox_systems": ["developer", "lead_developer", "infrastructure_admin"],
-            "automation_access": ["lead_developer", "infrastructure_admin"],
-        }
-
-    def capability_keyword_match(self, role_name: str, keyword: str) -> bool:
-        role_slug = self.route_slug(role_name)
-        key_slug = self.route_slug(keyword)
-
-        role_compact = role_slug.replace("_", "")
-        key_compact = key_slug.replace("_", "")
-
-        return key_slug in role_slug or key_compact in role_compact
-
-    def build_default_capabilities(self, guild: discord.Guild) -> dict[str, list[int]]:
-        caps = {key: [] for key in self.capability_defaults().keys()}
-
-        for role in guild.roles:
-            if role == guild.default_role or role.managed:
-                continue
-
-            for cap, keywords in self.capability_defaults().items():
-                for keyword in keywords:
-                    if self.capability_keyword_match(role.name, keyword):
-                        if role.id not in caps[cap]:
-                            caps[cap].append(role.id)
-
-        return caps
-
-    async def saved_capabilities(self, guild: discord.Guild) -> dict[str, list[int]]:
-        cfg = await get_core_config(self.bot)
-        caps = await cfg.guild(guild).capabilities()
-        caps = caps or {}
-
-        if not caps:
-            caps = self.build_default_capabilities(guild)
-
-        clean = {}
-
-        for key, ids in caps.items():
-            clean[self.route_slug(key)] = [int(x) for x in ids or []]
-
-        for key in self.capability_defaults().keys():
-            clean.setdefault(key, [])
-
-        return clean
-
-    async def save_capabilities(self, guild: discord.Guild, caps: dict[str, list[int]]):
-        cfg = await get_core_config(self.bot)
-        clean = {}
-
-        for key, ids in caps.items():
-            clean[self.route_slug(key)] = list(dict.fromkeys(int(x) for x in ids or []))
-
-        await cfg.guild(guild).capabilities.set(clean)
-
-    def capability_role_lines(self, guild: discord.Guild, caps: dict[str, list[int]], capability: str) -> list[str]:
-        capability = self.route_slug(capability)
-        lines = []
-
-        for rid in caps.get(capability, []):
-            role = guild.get_role(int(rid))
-            lines.append(f"• {role.mention if role else f'`missing:{rid}`'}")
-
-        return lines or ["No roles mapped."]
-
-    @mcore.group(name="capabilities", aliases=["capability"], invoke_without_command=True)
-    async def capabilities(self, ctx):
-        """Least-privilege role capability management."""
-        if not await require_admin(ctx):
-            return
-
-        caps = await self.saved_capabilities(ctx.guild)
-        lines = [
-            f"Saved capabilities: `{len(caps)}`",
-            "",
-            "**Commands:**",
-            "`!mcore capabilities defaults`",
-            "`!mcore capabilities applydefaults`",
-            "`!mcore capabilities list`",
-            "`!mcore capabilities matrix`",
-            "`!mcore capabilities check @Role`",
-            "`!mcore capabilities roles release_manager`",
-            "`!mcore capabilities add release_manager @Role`",
-            "`!mcore capabilities remove release_manager @Role`",
-            "",
-            "Default is deny. Core admin/Founder override only.",
-        ]
-
-        await self.send_paginated(ctx, "Mattis Capability System", lines)
-
-    @capabilities.command(name="defaults")
-    async def capabilities_defaults(self, ctx):
-        """Preview default capability mapping without saving."""
-        if not await require_admin(ctx):
-            return
-
-        caps = self.build_default_capabilities(ctx.guild)
-        lines = []
-
-        for cap in sorted(caps.keys()):
-            lines.append(f"**{cap}**")
-            lines.extend(self.capability_role_lines(ctx.guild, caps, cap))
-            lines.append("")
-
-        await self.send_paginated(ctx, "Default Capability Preview", lines)
-
-    @capabilities.command(name="applydefaults")
-    async def capabilities_applydefaults(self, ctx):
-        """Save default capability mapping."""
-        if not await require_admin(ctx):
-            return
-
-        caps = self.build_default_capabilities(ctx.guild)
-        await self.save_capabilities(ctx.guild, caps)
-
-        lines = [f"Saved `{len(caps)}` capabilities from current Discord roles.", ""]
-
-        for cap in sorted(caps.keys()):
-            lines.append(f"`{cap}` → `{len(caps[cap])}` roles")
-
-        await self.send_paginated(ctx, "Default Capabilities Applied", lines, color=discord.Color.green())
-
-    @capabilities.command(name="list")
-    async def capabilities_list(self, ctx):
-        """List saved capabilities."""
-        if not await require_admin(ctx):
-            return
-
-        caps = await self.saved_capabilities(ctx.guild)
-        lines = []
-
-        for cap in sorted(caps.keys()):
-            lines.append(f"`{cap}` → `{len(caps.get(cap, []))}` roles")
-
-        await self.send_paginated(ctx, "Saved Capabilities", lines)
-
-    @capabilities.command(name="roles")
-    async def capabilities_roles(self, ctx, capability: str):
-        """Show roles mapped to one capability."""
-        if not await require_admin(ctx):
-            return
-
-        capability = self.route_slug(capability)
-        caps = await self.saved_capabilities(ctx.guild)
-
-        if capability not in caps:
-            await ctx.send(embed=error_embed("Unknown capability", f"`{capability}` is not saved."))
-            return
-
-        lines = [f"Capability: `{capability}`", ""]
-        lines.extend(self.capability_role_lines(ctx.guild, caps, capability))
-
-        await self.send_paginated(ctx, f"Capability Roles: {capability}", lines)
-
-    @capabilities.command(name="add")
-    async def capabilities_add(self, ctx, capability: str, role: discord.Role):
-        """Add a role to a capability."""
-        if not await require_admin(ctx):
-            return
-
-        if role == ctx.guild.default_role:
-            await ctx.send(embed=error_embed("Unsafe role", "I will not map @everyone."))
-            return
-
-        if role.managed:
-            await ctx.send(embed=error_embed("Unsafe role", "I will not map managed bot/integration roles."))
-            return
-
-        capability = self.route_slug(capability)
-        caps = await self.saved_capabilities(ctx.guild)
-        caps.setdefault(capability, [])
-
-        if role.id not in caps[capability]:
-            caps[capability].append(role.id)
-
-        await self.save_capabilities(ctx.guild, caps)
-
-        await ctx.send(embed=ok_embed("Capability role added", f"{role.mention} added to `{capability}`."))
-
-    @capabilities.command(name="remove")
-    async def capabilities_remove(self, ctx, capability: str, role: discord.Role):
-        """Remove a role from a capability."""
-        if not await require_admin(ctx):
-            return
-
-        capability = self.route_slug(capability)
-        caps = await self.saved_capabilities(ctx.guild)
-        caps.setdefault(capability, [])
-        caps[capability] = [rid for rid in caps[capability] if int(rid) != role.id]
-
-        await self.save_capabilities(ctx.guild, caps)
-
-        await ctx.send(embed=ok_embed("Capability role removed", f"{role.mention} removed from `{capability}`."))
-
-    @capabilities.command(name="clear")
-    async def capabilities_clear(self, ctx, capability: str):
-        """Clear all roles from one capability."""
-        if not await require_admin(ctx):
-            return
-
-        capability = self.route_slug(capability)
-        caps = await self.saved_capabilities(ctx.guild)
-        caps[capability] = []
-
-        await self.save_capabilities(ctx.guild, caps)
-
-        await ctx.send(embed=ok_embed("Capability cleared", f"`{capability}` now has no roles."))
-
-    @capabilities.command(name="check")
-    async def capabilities_check(self, ctx, role: discord.Role):
-        """Check what capabilities a role has."""
-        if not await require_admin(ctx):
-            return
-
-        caps = await self.saved_capabilities(ctx.guild)
-        lines = [
-            f"Role: {role.mention}",
-            f"Position: `{role.position}`",
-            f"Discord Administrator: `{'yes' if role.permissions.administrator else 'no'}`",
-            "",
-            "**Capabilities:**",
-        ]
-
-        found = False
-
-        for cap in sorted(caps.keys()):
-            if role.id in [int(x) for x in caps.get(cap, [])]:
-                lines.append(f"✅ `{cap}`")
-                found = True
-
-        if not found:
-            lines.append("No capabilities mapped.")
-
-        await self.send_paginated(ctx, "Role Capability Check", lines)
-
-    @capabilities.command(name="matrix")
-    async def capabilities_matrix(self, ctx):
-        """Show every role and its exact capabilities."""
-        if not await require_admin(ctx):
-            return
-
-        caps = await self.saved_capabilities(ctx.guild)
-        lines = []
-
-        for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
-            if role == ctx.guild.default_role or role.managed:
-                continue
-
-            role_caps = []
-
-            for cap in sorted(caps.keys()):
-                if role.id in [int(x) for x in caps.get(cap, [])]:
-                    role_caps.append(cap)
-
-            if role_caps:
-                lines.append(f"{role.mention} → `{', '.join(role_caps)}`")
-            else:
-                lines.append(f"{role.mention} → `no bot access`")
-
-        await self.send_paginated(ctx, "Capability Matrix", lines)
 
 
     @mcore.command(name="routecheck")
