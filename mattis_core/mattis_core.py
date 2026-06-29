@@ -5404,6 +5404,128 @@ class MattisCore(commands.Cog):
         ranked.sort(key=lambda x: x[1], reverse=True)
         return ranked
 
+
+    def b4c_relation_reasons(self, base: dict, other: dict) -> list[str]:
+        b = self.b4a_classify_log_event(base)
+        o = self.b4a_classify_log_event(other)
+
+        reasons = []
+
+        if b["actor"] != "Unknown" and b["actor"] == o["actor"]:
+            reasons.append("same actor")
+
+        if b["action"] != "Unknown" and b["action"] == o["action"]:
+            reasons.append("same action")
+
+        if b["category"] == o["category"]:
+            reasons.append("same category")
+
+        if b["risk"] == o["risk"]:
+            reasons.append("same risk level")
+
+        bt = self.b4c_parse_time(b["createdAt"])
+        ot = self.b4c_parse_time(o["createdAt"])
+
+        if bt and ot:
+            minutes = abs(int((bt - ot).total_seconds() // 60))
+
+            if minutes <= 240:
+                reasons.append(f"within {minutes} minutes")
+
+        reason_words = set(str(b["reason"]).lower().replace(".", " ").replace("_", " ").split())
+        other_words = set(str(o["reason"]).lower().replace(".", " ").replace("_", " ").split())
+
+        ignored = {"updated", "platform", "setting", "secret", "key", "client", "webhook", "the", "and", "or"}
+        shared = sorted((reason_words.intersection(other_words)) - ignored)
+
+        if shared:
+            reasons.append("shared terms: " + ", ".join(shared[:5]))
+
+        return reasons
+
+    def b4c_related_score(self, base: dict, other: dict) -> int:
+        b = self.b4a_classify_log_event(base)
+        o = self.b4a_classify_log_event(other)
+
+        score = 0
+
+        same_actor = b["actor"] != "Unknown" and b["actor"] == o["actor"]
+        same_action = b["action"] != "Unknown" and b["action"] == o["action"]
+        same_category = b["category"] == o["category"]
+
+        if same_actor:
+            score += 3
+
+        if same_action:
+            score += 4
+
+        if same_category:
+            score += 5
+
+        if b["risk"] == o["risk"]:
+            score += 1
+
+        reason_words = set(str(b["reason"]).lower().replace(".", " ").replace("_", " ").split())
+        other_words = set(str(o["reason"]).lower().replace(".", " ").replace("_", " ").split())
+
+        ignored = {"updated", "platform", "setting", "secret", "key", "client", "webhook", "the", "and", "or"}
+        shared = (reason_words.intersection(other_words)) - ignored
+        score += min(len(shared) * 2, 8)
+
+        bt = self.b4c_parse_time(b["createdAt"])
+        ot = self.b4c_parse_time(o["createdAt"])
+
+        if bt and ot:
+            minutes = abs(int((bt - ot).total_seconds() // 60))
+
+            if minutes <= 15:
+                score += 6
+            elif minutes <= 60:
+                score += 4
+            elif minutes <= 240:
+                score += 2
+
+        if same_actor and same_action and same_category and b["category"] == "Secrets / Tokens":
+            score += 5
+
+        if same_actor and not same_action and not same_category:
+            score -= 4
+
+        return max(score, 0)
+
+    def b4c_is_meaningfully_related(self, base: dict, other: dict, score: int) -> bool:
+        b = self.b4a_classify_log_event(base)
+        o = self.b4a_classify_log_event(other)
+
+        if score < 10:
+            return False
+
+        same_actor = b["actor"] != "Unknown" and b["actor"] == o["actor"]
+        same_action = b["action"] != "Unknown" and b["action"] == o["action"]
+        same_category = b["category"] == o["category"]
+
+        bt = self.b4c_parse_time(b["createdAt"])
+        ot = self.b4c_parse_time(o["createdAt"])
+        close_time = False
+
+        if bt and ot:
+            minutes = abs(int((bt - ot).total_seconds() // 60))
+            close_time = minutes <= 240
+
+        if same_category and same_action:
+            return True
+
+        if same_category and same_actor and close_time:
+            return True
+
+        if same_action and same_actor and close_time:
+            return True
+
+        if "Secrets / Tokens" in [b["category"], o["category"]] and same_actor and close_time:
+            return True
+
+        return False
+
     @mcore.group(name="logs", invoke_without_command=True)
 
     async def logs(self, ctx):
@@ -5436,6 +5558,123 @@ class MattisCore(commands.Cog):
 
 
 
+
+
+    @logs.command(name="correlate")
+    async def logs_correlate(self, ctx, *, query: str):
+        """Find events meaningfully related to one event ID or query."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        if not events:
+            await ctx.send(embed=info_embed("Log Correlation", "No high-risk audit events returned by the API."))
+            return
+
+        query_l = str(query or "").lower().strip()
+
+        base = None
+
+        # Prefer direct search matches that are NOT generic entitlement records.
+        scored_bases = []
+
+        for event in events:
+            c = self.b4a_classify_log_event(event)
+            haystack = " ".join([
+                c.get("id", ""),
+                c.get("actor", ""),
+                c.get("action", ""),
+                c.get("category", ""),
+                c.get("reason", ""),
+                c.get("risk", ""),
+            ]).lower()
+
+            if query_l in haystack:
+                score = 0
+
+                if query_l in str(c.get("id", "")).lower():
+                    score += 50
+
+                if query_l in str(c.get("reason", "")).lower():
+                    score += 30
+
+                if query_l in str(c.get("category", "")).lower():
+                    score += 15
+
+                if c.get("category") == "Secrets / Tokens":
+                    score += 20
+
+                if c.get("action") == "platform.setting.updated":
+                    score += 10
+
+                if c.get("category") == "General":
+                    score -= 25
+
+                scored_bases.append((score, event))
+
+        if scored_bases:
+            scored_bases.sort(key=lambda x: x[0], reverse=True)
+            base = scored_bases[0][1]
+
+        if not base and hasattr(self, "b4b_find_single_event"):
+            base = self.b4b_find_single_event(events, query)
+
+        if not base:
+            await ctx.send(embed=info_embed("Log Correlation", f"No base event matched `{query}`."))
+            return
+
+        base_c = self.b4a_classify_log_event(base)
+
+        related = []
+
+        for event in events:
+            c = self.b4a_classify_log_event(event)
+
+            if c.get("id") == base_c.get("id"):
+                continue
+
+            score = self.b4c_related_score(base, event)
+
+            if self.b4c_is_meaningfully_related(base, event, score):
+                related.append((event, score))
+
+        related.sort(key=lambda x: x[1], reverse=True)
+
+        lines = [
+            "**Base event:**",
+            f"ID: `{base_c['id'] or 'Unknown'}`",
+            f"Time: `{base_c['createdAt']}`",
+            f"Actor: `{base_c['actor']}`",
+            f"Action: `{base_c['action']}`",
+            f"Category: `{base_c['category']}`",
+            f"Reason: {base_c['reason']}",
+            "",
+            f"Meaningfully related events found: `{len(related)}`",
+            "",
+        ]
+
+        if not related:
+            lines.append("No strongly related events found.")
+        else:
+            for idx, (event, score) in enumerate(related[:15], start=1):
+                c = self.b4a_classify_log_event(event)
+                reasons = self.b4c_relation_reasons(base, event)
+
+                lines.extend([
+                    f"**Related Event {idx}** — score `{score}`",
+                    f"ID: `{c['id'] or 'Unknown'}`",
+                    f"Time: `{c['createdAt']}`",
+                    f"Actor: `{c['actor']}`",
+                    f"Action: `{c['action']}`",
+                    f"Category: `{c['category']}`",
+                    f"Reason: {c['reason']}",
+                    f"Relation: {', '.join(reasons) if reasons else 'strong similarity'}",
+                    "",
+                ])
+
+        await self.send_paginated(ctx, "Log Correlation", lines)
 
     @logs.command(name="timeline")
     async def logs_timeline(self, ctx, limit: int = 25):
@@ -5608,73 +5847,6 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Suspicious Audit Events", lines)
 
-    @logs.command(name="correlate")
-    async def logs_correlate(self, ctx, *, query: str):
-        """Find events related to one event ID or query."""
-        if not await require_admin(ctx):
-            return
-
-        data = await self.b4a_fetch_highrisk_events(ctx.guild)
-        events = data.get("events") or []
-
-        if not events:
-            await ctx.send(embed=info_embed("Log Correlation", "No high-risk audit events returned by the API."))
-            return
-
-        base = self.b4b_find_single_event(events, query) if hasattr(self, "b4b_find_single_event") else None
-
-        if not base:
-            await ctx.send(embed=info_embed("Log Correlation", f"No base event matched `{query}`."))
-            return
-
-        base_c = self.b4a_classify_log_event(base)
-
-        related = []
-
-        for event in events:
-            c = self.b4a_classify_log_event(event)
-
-            if c.get("id") == base_c.get("id"):
-                continue
-
-            score = self.b4c_related_score(base, event)
-
-            if score >= 5:
-                related.append((event, score))
-
-        related.sort(key=lambda x: x[1], reverse=True)
-
-        lines = [
-            "**Base event:**",
-            f"ID: `{base_c['id'] or 'Unknown'}`",
-            f"Time: `{base_c['createdAt']}`",
-            f"Actor: `{base_c['actor']}`",
-            f"Action: `{base_c['action']}`",
-            f"Category: `{base_c['category']}`",
-            f"Reason: {base_c['reason']}",
-            "",
-            f"Related events found: `{len(related)}`",
-            "",
-        ]
-
-        if not related:
-            lines.append("No strongly related events found.")
-        else:
-            for idx, (event, score) in enumerate(related[:15], start=1):
-                c = self.b4a_classify_log_event(event)
-
-                lines.extend([
-                    f"**Related Event {idx}** — score `{score}`",
-                    f"ID: `{c['id'] or 'Unknown'}`",
-                    f"Time: `{c['createdAt']}`",
-                    f"Actor: `{c['actor']}`",
-                    f"Action: `{c['action']}`",
-                    f"Category: `{c['category']}`",
-                    f"Reason: {c['reason']}",
-                    "",
-                ])
-
-        await self.send_paginated(ctx, "Log Correlation", lines)
 
     @logs.command(name="find")
     async def logs_find(self, ctx, *, query: str):
