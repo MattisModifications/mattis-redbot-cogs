@@ -552,11 +552,24 @@ class MattisCore(commands.Cog):
             "/bot/backup/status",
         ]
 
+
     async def b5_check_endpoints(self, guild, include_optional: bool = False) -> list[dict]:
         endpoints = self.b5_core_endpoints()
 
+        ignored = {}
+
+        if hasattr(self, "b6_get_ignored_endpoints"):
+            try:
+                ignored = await self.b6_get_ignored_endpoints(guild)
+            except Exception:
+                ignored = {}
+
+        endpoints = [endpoint for endpoint in endpoints if endpoint not in ignored]
+
         if include_optional:
-            endpoints = endpoints + self.b5_optional_endpoints()
+            for endpoint in self.b5_optional_endpoints():
+                if endpoint not in ignored and endpoint not in endpoints:
+                    endpoints.append(endpoint)
 
         results = []
 
@@ -846,7 +859,269 @@ class MattisCore(commands.Cog):
 
         return "\n".join(lines)
 
+
+    async def b6_get_ignored_endpoints(self, guild) -> dict:
+        state = await self.b5_get_prod_state(guild) if hasattr(self, "b5_get_prod_state") else {}
+        ignored = state.get("ignored_endpoints") or {}
+
+        if not isinstance(ignored, dict):
+            ignored = {}
+
+        return ignored
+
+    async def b6_set_ignored_endpoints(self, guild, ignored: dict):
+        state = await self.b5_get_prod_state(guild)
+        state["ignored_endpoints"] = ignored
+        await self.b5_set_prod_state(guild, state)
+
+    def b6_endpoint_candidates(self, service: str) -> list[str]:
+        service = str(service or "").lower().strip()
+
+        maps = {
+            "incidents": [
+                "/bot/incidents",
+                "/bot/incidents/open",
+                "/bot/incidents/active",
+                "/bot/incidents/list",
+                "/bot/incident",
+                "/bot/incident/open",
+                "/bot/incident/active",
+                "/bot/status/incidents",
+            ],
+            "backups": [
+                "/bot/backups/status",
+                "/bot/backup/status",
+                "/backups/status",
+                "/health/backups",
+                "/bot/system/backups",
+            ],
+            "health": [
+                "/health",
+                "/api/health",
+                "/bot/status",
+                "/bot/health",
+                "/status",
+            ],
+            "billing": [
+                "/bot/billing/failed",
+                "/bot/billing/pastdue",
+                "/bot/billing/status",
+            ],
+            "roblox": [
+                "/bot/roblox/broken",
+                "/bot/roblox/status",
+                "/bot/roblox/health",
+            ],
+            "discord": [
+                "/bot/discord/broken",
+                "/bot/discord/status",
+                "/bot/discord/health",
+            ],
+        }
+
+        return maps.get(service, [f"/bot/{service}", f"/bot/{service}/status", f"/bot/{service}/health"])
+
+    async def b6_discover_service(self, guild, service: str) -> list[dict]:
+        results = []
+
+        for endpoint in self.b6_endpoint_candidates(service):
+            results.append(await self.b5_http_get(guild, endpoint, timeout_seconds=8))
+
+        return results
+
+    def b6_codeblock(self, text: str, language: str = "bash") -> str:
+        text = str(text or "")
+        return f"```{language}\n{text[:1800]}\n```"
+
+    def b6_shell_lines(self, lines: list[str]) -> list[str]:
+        out = []
+
+        for line in lines:
+            out.append("```bash")
+            out.append(line)
+            out.append("```")
+
+        return out
+
+    def b6_missing_endpoint_contract_lines(self) -> list[str]:
+        return [
+            "**Required API contracts to clear current production blockers:**",
+            "",
+            "**GET `/bot/incidents`**",
+            "Expected HTTP: `200`",
+            "Expected JSON:",
+            "```json",
+            '{ "incidents": [], "count": 0 }',
+            "```",
+            "Purpose: lets the bot know whether there are active incidents.",
+            "",
+            "**GET `/bot/backups/status`**",
+            "Expected HTTP: `200`",
+            "Expected JSON:",
+            "```json",
+            '{ "ok": true, "latest": { "createdAt": "2026-06-29T00:00:00.000Z", "type": "postgres", "verified": true }, "retentionDays": 14 }',
+            "```",
+            "Purpose: lets the bot verify backup status instead of saying manual checks are required.",
+            "",
+            "**Important:**",
+            "These endpoints should return safe metadata only. Do not return secrets, database URLs, file paths containing secrets, or raw backup contents.",
+        ]
+
+    def b6_backup_plan_lines(self) -> list[str]:
+        return [
+            "**Postgres backup plan for VPS**",
+            "",
+            "Create backup folders:",
+            "```bash",
+            "sudo mkdir -p /opt/mattis/backups/postgres /opt/mattis/backups/env\nsudo chown -R deploy:deploy /opt/mattis/backups\nchmod 700 /opt/mattis/backups",
+            "```",
+            "Create a backup now using `DATABASE_URL` from `/opt/mattis/.env`:",
+            "```bash",
+            "sudo -iu deploy bash -lc 'set -a; source /opt/mattis/.env; set +a; pg_dump \"$DATABASE_URL\" -Fc -f \"/opt/mattis/backups/postgres/mattis-$(date -u +%Y%m%dT%H%M%SZ).dump\"'",
+            "```",
+            "List backups:",
+            "```bash",
+            "sudo -iu deploy ls -lh /opt/mattis/backups/postgres",
+            "```",
+            "Retention cleanup, 14 days:",
+            "```bash",
+            "sudo -iu deploy find /opt/mattis/backups/postgres -type f -name '*.dump' -mtime +14 -delete",
+            "```",
+            "Safe restore test flow:",
+            "```bash",
+            "sudo -iu postgres createdb mattis_restore_test\nsudo -iu deploy bash -lc 'latest=$(ls -1t /opt/mattis/backups/postgres/*.dump | head -1); pg_restore -d mattis_restore_test \"$latest\"'\nsudo -iu postgres psql -d mattis_restore_test -c '\\dt'\nsudo -iu postgres dropdb mattis_restore_test",
+            "```",
+            "Cron example, daily at 03:10 UTC:",
+            "```bash",
+            "(crontab -l 2>/dev/null; echo '10 3 * * * set -a; . /opt/mattis/.env; set +a; pg_dump \"$DATABASE_URL\" -Fc -f \"/opt/mattis/backups/postgres/mattis-$(date -u +\\%Y\\%m\\%dT\\%H\\%M\\%SZ).dump\" && find /opt/mattis/backups/postgres -type f -name \"*.dump\" -mtime +14 -delete') | crontab -",
+            "```",
+        ]
+
+    def b6_vps_runbook_lines(self) -> list[str]:
+        return [
+            "**VPS production runbook commands**",
+            "",
+            "Check API service status:",
+            "```bash",
+            "systemctl status mattis-api --no-pager || true\nsystemctl status mattis --no-pager || true\npm2 status || true",
+            "```",
+            "Check recent API logs:",
+            "```bash",
+            "journalctl -u mattis-api --no-pager -n 120 || true\njournalctl -u mattis --no-pager -n 120 || true\npm2 logs --lines 120 || true",
+            "```",
+            "Check Nginx:",
+            "```bash",
+            "sudo nginx -t\nsudo systemctl status nginx --no-pager\nsudo journalctl -u nginx --no-pager -n 80",
+            "```",
+            "Check ports:",
+            "```bash",
+            "sudo ss -tulpn | grep -E ':80|:443|:3000|:4000|:5000|:5432|:6379' || true",
+            "```",
+            "Check disk/memory:",
+            "```bash",
+            "df -h\nfree -h\nuptime",
+            "```",
+            "Restart API safely, choose the one your VPS uses:",
+            "```bash",
+            "sudo systemctl restart mattis-api || true\npm2 restart all || true",
+            "```",
+        ]
+
+    def b6_envcheck_lines(self) -> list[str]:
+        keys = [
+            "DATABASE_URL",
+            "REDIS_URL",
+            "MATTIS_BOT_API_TOKEN",
+            "DISCORD_CLIENT_ID",
+            "DISCORD_CLIENT_SECRET",
+            "ROBLOX_CLIENT_ID",
+            "ROBLOX_CLIENT_SECRET",
+            "ROBLOX_OPEN_CLOUD_API_KEY",
+            "STRIPE_SECRET_KEY",
+            "STRIPE_WEBHOOK_SECRET",
+            "RESEND_API_KEY",
+        ]
+
+        key_string = " ".join(keys)
+
+        return [
+            "**Safe `.env` presence check**",
+            "",
+            "This checks whether keys exist without printing secret values.",
+            "",
+            "```bash",
+            f"sudo bash -lc 'for k in {key_string}; do if grep -q \"^$k=\" /opt/mattis/.env; then echo \"✅ $k=SET\"; else echo \"❌ $k=MISSING\"; fi; done'",
+            "```",
+            "Show env key names only:",
+            "```bash",
+            "sudo bash -lc \"cut -d= -f1 /opt/mattis/.env | sort\"",
+            "```",
+            "Do not paste actual secret values into Discord.",
+        ]
+
+    def b6_deploy_plan_lines(self) -> list[str]:
+        return [
+            "**Safe deployment plan**",
+            "",
+            "1. Run bot preflight:",
+            "```text",
+            "!mcore prod preflight release-name",
+            "```",
+            "2. Snapshot current readiness:",
+            "```text",
+            "!mcore prod snapshot",
+            "```",
+            "3. On VPS, pull code and install dependencies:",
+            "```bash",
+            "cd /opt/mattis\nsudo -iu deploy git status --short\nsudo -iu deploy git pull\nsudo -iu deploy npm ci || sudo -iu deploy pnpm install --frozen-lockfile",
+            "```",
+            "4. Build:",
+            "```bash",
+            "cd /opt/mattis\nsudo -iu deploy npm run build || sudo -iu deploy pnpm build",
+            "```",
+            "5. Migrate DB only if your release needs it:",
+            "```bash",
+            "cd /opt/mattis\nsudo -iu deploy npx prisma migrate deploy || true",
+            "```",
+            "6. Restart service:",
+            "```bash",
+            "sudo systemctl restart mattis-api || pm2 restart all",
+            "```",
+            "7. Verify:",
+            "```text",
+            "!mcore prod endpoints\n!mcore prod readiness\n!mcore doctor\n!mcore alerts ops",
+            "```",
+        ]
+
+    def b6_rollback_lines(self) -> list[str]:
+        return [
+            "**Rollback plan**",
+            "",
+            "1. Identify last known good commit:",
+            "```bash",
+            "cd /opt/mattis\ngit log --oneline -10",
+            "```",
+            "2. Create emergency backup before changing anything:",
+            "```bash",
+            "sudo -iu deploy bash -lc 'set -a; source /opt/mattis/.env; set +a; pg_dump \"$DATABASE_URL\" -Fc -f \"/opt/mattis/backups/postgres/pre-rollback-$(date -u +%Y%m%dT%H%M%SZ).dump\"'",
+            "```",
+            "3. Roll back code:",
+            "```bash",
+            "cd /opt/mattis\nsudo -iu deploy git checkout <GOOD_COMMIT_SHA>\nsudo -iu deploy npm ci || sudo -iu deploy pnpm install --frozen-lockfile\nsudo -iu deploy npm run build || sudo -iu deploy pnpm build",
+            "```",
+            "4. Restart service:",
+            "```bash",
+            "sudo systemctl restart mattis-api || pm2 restart all",
+            "```",
+            "5. Verify from Discord:",
+            "```text",
+            "!mcore prod health\n!mcore prod endpoints\n!mcore prod readiness",
+            "```",
+            "6. Only restore database if the rollback specifically requires DB rollback. Do not restore DB blindly.",
+        ]
+
     @mcore.group(name="prod", invoke_without_command=True)
+
     async def prod(self, ctx):
         """Production readiness and service health control centre."""
         if not await require_admin(ctx):
@@ -855,23 +1130,307 @@ class MattisCore(commands.Cog):
         lines = [
             "**Mattis Production Control Centre**",
             "",
+            "**Health / readiness**",
             "`!mcore prod health` — quick production health check",
             "`!mcore prod api` — API/base configuration and basic reachability",
             "`!mcore prod endpoints` — check all core API bot endpoints",
             "`!mcore prod readiness` — readiness score and blockers",
             "`!mcore prod preflight <release>` — release preflight gate",
+            "",
+            "**Release safety**",
             "`!mcore prod freeze on/off/status <reason>` — release freeze control",
+            "`!mcore prod snapshot` — save readiness snapshot",
+            "`!mcore prod snapshots` — list saved snapshots",
+            "",
+            "**Remediation / discovery**",
+            "`!mcore prod remediate` — fix plan for current blockers",
+            "`!mcore prod incidents` — discover/fix incident route issue",
+            "`!mcore prod discover <service>` — discover likely API route names",
+            "`!mcore prod endpoint-ignore <endpoint> <reason>` — temporarily ignore endpoint",
+            "`!mcore prod endpoint-require <endpoint>` — require endpoint again",
+            "`!mcore prod endpoint-ignored` — list ignored endpoints",
+            "`!mcore prod contracts` — required API response contracts",
+            "",
+            "**Runbooks**",
             "`!mcore prod backup` — backup readiness/status intelligence",
+            "`!mcore prod backup-plan` — VPS Postgres backup commands",
+            "`!mcore prod vps` — VPS health/runbook commands",
+            "`!mcore prod envcheck` — safe .env presence check",
+            "`!mcore prod deploy-plan` — safe deployment flow",
+            "`!mcore prod rollback` — rollback flow",
+            "",
+            "**Reports**",
             "`!mcore prod security` — security/audit readiness summary",
             "`!mcore prod risks` — production risks list",
             "`!mcore prod checklist` — production checklist",
-            "`!mcore prod snapshot` — save readiness snapshot",
-            "`!mcore prod snapshots` — list saved snapshots",
             "`!mcore prod report` — full report in Discord",
             "`!mcore prod export` — export report as .txt",
         ]
 
         await self.send_paginated(ctx, "Production Control", lines)
+
+
+    @prod.command(name="endpoint-ignore")
+    async def prod_endpoint_ignore(self, ctx, endpoint: str, *, reason: str = ""):
+        """Temporarily ignore a known missing/non-required endpoint in readiness checks."""
+        if not await require_admin(ctx):
+            return
+
+        endpoint = endpoint if endpoint.startswith("/") else "/" + endpoint
+        ignored = await self.b6_get_ignored_endpoints(ctx.guild)
+
+        ignored[endpoint] = {
+            "reason": reason or "No reason provided.",
+            "by": str(ctx.author),
+            "at": self.b5_now_iso() if hasattr(self, "b5_now_iso") else "",
+        }
+
+        await self.b6_set_ignored_endpoints(ctx.guild, ignored)
+
+        await ctx.send(embed=ok_embed(
+            "Endpoint ignored",
+            f"`{endpoint}` will be ignored in production readiness checks.\nReason: {ignored[endpoint]['reason']}"
+        ))
+
+    @prod.command(name="endpoint-require")
+    async def prod_endpoint_require(self, ctx, endpoint: str):
+        """Remove an endpoint from the readiness ignore list."""
+        if not await require_admin(ctx):
+            return
+
+        endpoint = endpoint if endpoint.startswith("/") else "/" + endpoint
+        ignored = await self.b6_get_ignored_endpoints(ctx.guild)
+
+        existed = endpoint in ignored
+
+        if existed:
+            ignored.pop(endpoint, None)
+            await self.b6_set_ignored_endpoints(ctx.guild, ignored)
+
+        await ctx.send(embed=ok_embed(
+            "Endpoint required",
+            f"`{endpoint}` is now required again." if existed else f"`{endpoint}` was not ignored."
+        ))
+
+    @prod.command(name="endpoint-ignored")
+    async def prod_endpoint_ignored(self, ctx):
+        """List endpoints ignored by readiness checks."""
+        if not await require_admin(ctx):
+            return
+
+        ignored = await self.b6_get_ignored_endpoints(ctx.guild)
+
+        if not ignored:
+            await ctx.send(embed=info_embed("Ignored Endpoints", "No endpoints are currently ignored."))
+            return
+
+        lines = []
+
+        for endpoint, meta in ignored.items():
+            lines.extend([
+                f"**{endpoint}**",
+                f"Reason: {meta.get('reason', 'Unknown')}",
+                f"By: `{meta.get('by', 'Unknown')}`",
+                f"At: `{meta.get('at', 'Unknown')}`",
+                f"Require again: `!mcore prod endpoint-require {endpoint}`",
+                "",
+            ])
+
+        await self.send_paginated(ctx, "Ignored Endpoints", lines)
+
+    @prod.command(name="discover")
+    async def prod_discover(self, ctx, service: str):
+        """Discover likely API route names for a service."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b6_discover_service(ctx.guild, service)
+
+        lines = [
+            f"Service: `{service}`",
+            "",
+        ]
+
+        lines.extend(self.b5_check_lines(results))
+
+        ok = [x for x in results if x.get("ok")]
+
+        lines.extend([
+            "",
+            f"Working candidates: `{len(ok)}`",
+        ])
+
+        if ok:
+            for item in ok:
+                lines.append(f"- `{item.get('endpoint')}`")
+        else:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "API Route Discovery", lines)
+
+    @prod.command(name="incidents")
+    async def prod_incidents(self, ctx):
+        """Discover and explain the current incident endpoint blocker."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b6_discover_service(ctx.guild, "incidents")
+        ok = [x for x in results if x.get("ok")]
+
+        lines = [
+            "**Incident endpoint discovery**",
+            "",
+        ]
+
+        lines.extend(self.b5_check_lines(results))
+        lines.append("")
+
+        if ok:
+            lines.append("✅ A working incident endpoint was found:")
+            for item in ok:
+                lines.append(f"- `{item.get('endpoint')}`")
+
+            lines.extend([
+                "",
+                "Next step: update B5 core endpoint list to use the working route if it is not `/bot/incidents`.",
+            ])
+        else:
+            lines.extend([
+                "🚫 No incident endpoint candidate returned HTTP 2xx.",
+                "",
+                "This is why production readiness is blocked.",
+                "",
+                "Options:",
+                "1. Implement `GET /bot/incidents` in the API.",
+                "2. If incidents are not part of the current API yet, temporarily ignore it:",
+                "`!mcore prod endpoint-ignore /bot/incidents Incidents route not implemented yet.`",
+                "",
+            ])
+
+            lines.extend(self.b6_missing_endpoint_contract_lines())
+
+        await self.send_paginated(ctx, "Incident Endpoint Remediation", lines)
+
+    @prod.command(name="contracts")
+    async def prod_contracts(self, ctx):
+        """Show required API contracts for production bot checks."""
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "API Route Contracts", self.b6_missing_endpoint_contract_lines())
+
+    @prod.command(name="remediate")
+    async def prod_remediate(self, ctx):
+        """Generate a remediation plan for current production blockers."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b5_build_readiness(ctx.guild, include_optional=False)
+        readiness = data.get("readiness") or {}
+        checks = data.get("checks") or {}
+        security = data.get("security") or {}
+
+        failed = [x for x in checks if not x.get("ok")]
+
+        lines = [
+            f"Readiness: `{readiness.get('label')}`",
+            f"Score: `{readiness.get('score')}/100`",
+            "",
+            "**Failed endpoints:**",
+        ]
+
+        if failed:
+            for item in failed:
+                lines.append(f"- `{item.get('endpoint')}` — HTTP `{item.get('status')}` — {item.get('error') or item.get('text_preview')}")
+        else:
+            lines.append("- None")
+
+        lines.extend([
+            "",
+            "**Fix plan:**",
+        ])
+
+        if any(x.get("endpoint") == "/bot/incidents" and x.get("status") == 404 for x in failed):
+            lines.extend([
+                "1. `/bot/incidents` is missing from the API.",
+                "   - Best fix: implement `GET /bot/incidents` returning `{ incidents: [], count: 0 }`.",
+                "   - Temporary readiness bypass if not implemented yet:",
+                "   `!mcore prod endpoint-ignore /bot/incidents Incidents route not implemented yet.`",
+                "   - Run `!mcore prod incidents` for route discovery/details.",
+                "",
+            ])
+
+        if int(security.get("highrisk_events", 0) or 0) > 0:
+            lines.extend([
+                "2. High-risk audit events are still present.",
+                "   - Run `!mcore logs executive`.",
+                "   - Run `!mcore logs packet stripe`.",
+                "   - Add an alert note explaining whether the changes were expected.",
+                "   - Resolve/reopen the alert based on current API evidence.",
+                "",
+            ])
+
+        if int(security.get("secret_events", 0) or 0) > 0:
+            lines.extend([
+                "3. Secret/token/webhook events need sign-off.",
+                "   - Confirm values were intentionally rotated/updated.",
+                "   - Confirm no values were exposed in Discord/GitHub/screenshots.",
+                "   - Confirm Stripe/Roblox/Discord flows still work.",
+                "",
+            ])
+
+        lines.extend([
+            "4. Backup endpoint is optional unless implemented, but manual backup checks are still needed.",
+            "   - Run `!mcore prod backup-plan` for VPS commands.",
+            "   - Add `GET /bot/backups/status` later to make this visible to the bot.",
+            "",
+            "5. Re-test:",
+            "`!mcore prod endpoints`",
+            "`!mcore prod readiness`",
+            "`!mcore prod preflight production-pass`",
+        ])
+
+        await self.send_paginated(ctx, "Production Remediation Plan", lines)
+
+    @prod.command(name="backup-plan")
+    async def prod_backup_plan(self, ctx):
+        """Show VPS Postgres backup and restore-test commands."""
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "Backup Plan", self.b6_backup_plan_lines())
+
+    @prod.command(name="vps")
+    async def prod_vps(self, ctx):
+        """Show VPS production health/runbook commands."""
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "VPS Runbook", self.b6_vps_runbook_lines())
+
+    @prod.command(name="envcheck")
+    async def prod_envcheck(self, ctx):
+        """Show safe environment variable presence checks."""
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "Environment Check", self.b6_envcheck_lines())
+
+    @prod.command(name="deploy-plan")
+    async def prod_deploy_plan(self, ctx):
+        """Show safe deployment plan."""
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "Deployment Plan", self.b6_deploy_plan_lines())
+
+    @prod.command(name="rollback")
+    async def prod_rollback(self, ctx):
+        """Show rollback plan."""
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "Rollback Plan", self.b6_rollback_lines())
 
     @prod.command(name="api")
     async def prod_api(self, ctx):
