@@ -4199,6 +4199,293 @@ class MattisCore(commands.Cog):
         )
 
 
+
+    def capability_defaults(self) -> dict:
+        return {
+            "core_admin": ["founder", "administrator"],
+
+            "management_view": ["founder", "director", "executive"],
+            "finance_view": ["director", "executive"],
+
+            "general_support": ["support_agent", "support_lead"],
+            "support_lead": ["support_lead"],
+            "billing_support": ["billing_support"],
+            "technical_support": ["technical_support"],
+            "security_support": ["security_support"],
+
+            "moderation": ["moderator", "senior_moderator"],
+            "incident_response": ["incident_response"],
+            "audit_review": ["audit_reviewer"],
+
+            "security_admin": ["security_admin"],
+            "infrastructure_admin": ["infrastructure_admin"],
+
+            "development_read": ["developer", "lead_developer", "qa_tester", "release_manager"],
+            "backend_access": ["developer", "lead_developer"],
+            "production_access": ["lead_developer", "infrastructure_admin"],
+            "release_manager": ["release_manager"],
+            "qa_testing": ["qa_tester"],
+            "design_access": ["designer"],
+
+            "discord_systems": ["developer", "lead_developer", "infrastructure_admin"],
+            "roblox_systems": ["developer", "lead_developer", "infrastructure_admin"],
+            "automation_access": ["lead_developer", "infrastructure_admin"],
+        }
+
+    def capability_keyword_match(self, role_name: str, keyword: str) -> bool:
+        role_slug = self.route_slug(role_name)
+        key_slug = self.route_slug(keyword)
+
+        return key_slug.replace("_", "") in role_slug.replace("_", "")
+
+    def build_default_capabilities(self, guild: discord.Guild) -> dict[str, list[int]]:
+        caps = {key: [] for key in self.capability_defaults().keys()}
+
+        for role in guild.roles:
+            if role == guild.default_role or role.managed:
+                continue
+
+            for cap, keywords in self.capability_defaults().items():
+                for keyword in keywords:
+                    if self.capability_keyword_match(role.name, keyword):
+                        if role.id not in caps[cap]:
+                            caps[cap].append(role.id)
+
+        return caps
+
+    async def saved_capabilities(self, guild: discord.Guild) -> dict[str, list[int]]:
+        cfg = await get_core_config(self.bot)
+        caps = await cfg.guild(guild).capabilities()
+        caps = caps or {}
+
+        if not caps:
+            caps = self.build_default_capabilities(guild)
+
+        clean = {}
+
+        for key, ids in caps.items():
+            clean[self.route_slug(key)] = [int(x) for x in ids or []]
+
+        for key in self.capability_defaults().keys():
+            clean.setdefault(key, [])
+
+        return clean
+
+    async def save_capabilities(self, guild: discord.Guild, caps: dict[str, list[int]]):
+        cfg = await get_core_config(self.bot)
+        clean = {}
+
+        for key, ids in caps.items():
+            clean[self.route_slug(key)] = list(dict.fromkeys(int(x) for x in ids or []))
+
+        await cfg.guild(guild).capabilities.set(clean)
+
+    def capability_role_lines(self, guild: discord.Guild, caps: dict[str, list[int]], capability: str) -> list[str]:
+        capability = self.route_slug(capability)
+        lines = []
+
+        for rid in caps.get(capability, []):
+            role = guild.get_role(int(rid))
+            lines.append(f"• {role.mention if role else f'`missing:{rid}`'}")
+
+        return lines or ["No roles mapped."]
+
+    @mcore.group(name="capabilities", aliases=["capability"], invoke_without_command=True)
+    async def capabilities(self, ctx):
+        """Least-privilege role capability management."""
+        if not await require_admin(ctx):
+            return
+
+        caps = await self.saved_capabilities(ctx.guild)
+
+        lines = [
+            f"Saved capabilities: `{len(caps)}`",
+            "",
+            "**Commands:**",
+            "`!mcore capabilities defaults`",
+            "`!mcore capabilities applydefaults`",
+            "`!mcore capabilities list`",
+            "`!mcore capabilities matrix`",
+            "`!mcore capabilities check @Role`",
+            "`!mcore capabilities roles release_manager`",
+            "`!mcore capabilities add release_manager @Role`",
+            "`!mcore capabilities remove release_manager @Role`",
+            "`!mcore capabilities clear release_manager`",
+            "",
+            "Default is deny. Only explicit capability mappings give access.",
+        ]
+
+        await self.send_paginated(ctx, "Mattis Capability System", lines)
+
+    @capabilities.command(name="defaults")
+    async def capabilities_defaults(self, ctx):
+        """Preview default capability mapping without saving."""
+        if not await require_admin(ctx):
+            return
+
+        caps = self.build_default_capabilities(ctx.guild)
+        lines = []
+
+        for cap in sorted(caps.keys()):
+            lines.append(f"**{cap}**")
+            lines.extend(self.capability_role_lines(ctx.guild, caps, cap))
+            lines.append("")
+
+        await self.send_paginated(ctx, "Default Capability Preview", lines)
+
+    @capabilities.command(name="applydefaults")
+    async def capabilities_applydefaults(self, ctx):
+        """Save default capability mapping."""
+        if not await require_admin(ctx):
+            return
+
+        caps = self.build_default_capabilities(ctx.guild)
+        await self.save_capabilities(ctx.guild, caps)
+
+        lines = [f"Saved `{len(caps)}` capabilities from current Discord roles.", ""]
+
+        for cap in sorted(caps.keys()):
+            lines.append(f"`{cap}` → `{len(caps[cap])}` roles")
+
+        await self.send_paginated(ctx, "Default Capabilities Applied", lines, color=discord.Color.green())
+
+    @capabilities.command(name="list")
+    async def capabilities_list(self, ctx):
+        """List saved capabilities."""
+        if not await require_admin(ctx):
+            return
+
+        caps = await self.saved_capabilities(ctx.guild)
+        lines = []
+
+        for cap in sorted(caps.keys()):
+            lines.append(f"`{cap}` → `{len(caps.get(cap, []))}` roles")
+
+        await self.send_paginated(ctx, "Saved Capabilities", lines)
+
+    @capabilities.command(name="roles")
+    async def capabilities_roles(self, ctx, capability: str):
+        """Show roles mapped to one capability."""
+        if not await require_admin(ctx):
+            return
+
+        capability = self.route_slug(capability)
+        caps = await self.saved_capabilities(ctx.guild)
+
+        if capability not in caps:
+            await ctx.send(embed=error_embed("Unknown capability", f"`{capability}` is not saved."))
+            return
+
+        lines = [f"Capability: `{capability}`", ""]
+        lines.extend(self.capability_role_lines(ctx.guild, caps, capability))
+
+        await self.send_paginated(ctx, f"Capability Roles: {capability}", lines)
+
+    @capabilities.command(name="add")
+    async def capabilities_add(self, ctx, capability: str, role: discord.Role):
+        """Add a role to a capability."""
+        if not await require_admin(ctx):
+            return
+
+        if role == ctx.guild.default_role or role.managed or self.is_separator_role(role):
+            await ctx.send(embed=error_embed("Unsafe role", "I will not map @everyone, managed roles, or separator/header roles."))
+            return
+
+        capability = self.route_slug(capability)
+        caps = await self.saved_capabilities(ctx.guild)
+        caps.setdefault(capability, [])
+
+        if role.id not in caps[capability]:
+            caps[capability].append(role.id)
+
+        await self.save_capabilities(ctx.guild, caps)
+
+        await ctx.send(embed=ok_embed("Capability role added", f"{role.mention} added to `{capability}`."))
+
+    @capabilities.command(name="remove")
+    async def capabilities_remove(self, ctx, capability: str, role: discord.Role):
+        """Remove a role from a capability."""
+        if not await require_admin(ctx):
+            return
+
+        capability = self.route_slug(capability)
+        caps = await self.saved_capabilities(ctx.guild)
+        caps.setdefault(capability, [])
+        caps[capability] = [rid for rid in caps[capability] if int(rid) != role.id]
+
+        await self.save_capabilities(ctx.guild, caps)
+
+        await ctx.send(embed=ok_embed("Capability role removed", f"{role.mention} removed from `{capability}`."))
+
+    @capabilities.command(name="clear")
+    async def capabilities_clear(self, ctx, capability: str):
+        """Clear all roles from one capability."""
+        if not await require_admin(ctx):
+            return
+
+        capability = self.route_slug(capability)
+        caps = await self.saved_capabilities(ctx.guild)
+        caps[capability] = []
+
+        await self.save_capabilities(ctx.guild, caps)
+
+        await ctx.send(embed=ok_embed("Capability cleared", f"`{capability}` now has no roles."))
+
+    @capabilities.command(name="check")
+    async def capabilities_check(self, ctx, role: discord.Role):
+        """Check what capabilities a role has."""
+        if not await require_admin(ctx):
+            return
+
+        caps = await self.saved_capabilities(ctx.guild)
+
+        lines = [
+            f"Role: {role.mention}",
+            f"Position: `{role.position}`",
+            f"Discord Administrator: `{'yes' if role.permissions.administrator else 'no'}`",
+            "",
+            "**Capabilities:**",
+        ]
+
+        found = False
+
+        for cap in sorted(caps.keys()):
+            if role.id in [int(x) for x in caps.get(cap, [])]:
+                lines.append(f"✅ `{cap}`")
+                found = True
+
+        if not found:
+            lines.append("No capabilities mapped.")
+
+        await self.send_paginated(ctx, "Role Capability Check", lines)
+
+    @capabilities.command(name="matrix")
+    async def capabilities_matrix(self, ctx):
+        """Show every role and its exact capabilities."""
+        if not await require_admin(ctx):
+            return
+
+        caps = await self.saved_capabilities(ctx.guild)
+        lines = []
+
+        for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
+            if role == ctx.guild.default_role or role.managed:
+                continue
+
+            role_caps = []
+
+            for cap in sorted(caps.keys()):
+                if role.id in [int(x) for x in caps.get(cap, [])]:
+                    role_caps.append(cap)
+
+            if role_caps:
+                lines.append(f"{role.mention} → `{', '.join(role_caps)}`")
+            else:
+                lines.append(f"{role.mention} → `no bot access`")
+
+        await self.send_paginated(ctx, "Capability Matrix", lines)
+
+
     def access_model(self) -> list[dict]:
         return [
             {
