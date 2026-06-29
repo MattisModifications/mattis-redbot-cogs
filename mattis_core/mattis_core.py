@@ -1640,21 +1640,24 @@ class MattisCore(commands.Cog):
 
         return lines
 
+
+
     def b8_notify_lines(self, incident_id: str, inc: dict, mode: str) -> list[str]:
         mode = str(mode or "internal").lower().strip()
         title = inc.get("title") or incident_id
         sev = self.b7_severity_normalise(inc.get("severity", "medium")).title()
-        status = str(inc.get("status", "open")).title()
+        status_raw = str(inc.get("status", "open")).lower()
+        status = status_raw.title()
         current = inc.get("current_status") or "Investigation is ongoing."
         customer = inc.get("customer_impact") or inc.get("impact") or "Impact is being assessed."
         next_action = inc.get("next_action") or "The team is continuing investigation and monitoring."
 
-        if mode == "resolved":
+        if mode == "resolved" or status_raw == "resolved":
             return [
                 f"**Resolved update — `{incident_id}`**",
                 f"`{sev}` incident **{title}** is now resolved.",
                 "",
-                f"Resolution: {inc.get('resolution') or 'Resolution details are being finalised.'}",
+                f"Resolution: {inc.get('resolution') or 'Resolution details are documented internally.'}",
                 f"Impact: {customer}",
                 "",
                 "Monitoring will continue and follow-up actions will be documented internally.",
@@ -1664,7 +1667,7 @@ class MattisCore(commands.Cog):
             return [
                 f"**Customer-safe update — `{incident_id}`**",
                 "",
-                f"We are currently reviewing an issue affecting part of the service.",
+                "We are currently reviewing an operational event affecting part of the service.",
                 f"Status: {status}.",
                 f"Impact: {customer}",
                 "",
@@ -2489,6 +2492,1878 @@ class MattisCore(commands.Cog):
 
         return "\n".join(lines)
 
+
+    # ============================================================
+    # B20 — SLO / Availability Targets
+    # ============================================================
+
+    async def b20_get_slo_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("slo_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("targets", {})
+        state.setdefault("history", [])
+        return state
+
+    async def b20_set_slo_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["slo_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b20_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    @mcore.group(name="slo", invoke_without_command=True)
+    async def slo(self, ctx):
+        """SLO and availability targets."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**SLO / Availability Centre**",
+            "",
+            "`!mcore slo set <service> <availability_percent> <latency_ms>` — set SLO target",
+            "`!mcore slo list` — list targets",
+            "`!mcore slo check` — check monitor results against SLOs",
+            "`!mcore slo report` — SLO report",
+            "`!mcore slo export` — export SLO report",
+        ]
+
+        await self.send_paginated(ctx, "SLO Centre", lines)
+
+    @slo.command(name="set")
+    async def slo_set(self, ctx, service: str, availability: float, latency_ms: int):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b20_get_slo_state(ctx.guild)
+        state.setdefault("targets", {})[service.lower()] = {
+            "service": service,
+            "availability": float(availability),
+            "latency_ms": int(latency_ms),
+            "updated_at": self.b20_now_iso(),
+            "updated_by": str(ctx.author),
+        }
+
+        await self.b20_set_slo_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("SLO target saved", f"`{service}` availability `{availability}%`, latency `{latency_ms}ms`."))
+
+    @slo.command(name="list")
+    async def slo_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b20_get_slo_state(ctx.guild)
+        targets = state.get("targets") or {}
+
+        if not targets:
+            await ctx.send(embed=info_embed("SLO Targets", "No SLO targets set."))
+            return
+
+        lines = []
+
+        for key, item in sorted(targets.items()):
+            lines.append(f"`{item.get('service')}` — availability `{item.get('availability')}%` — latency `{item.get('latency_ms')}ms`")
+
+        await self.send_paginated(ctx, "SLO Targets", lines)
+
+    async def b20_build_slo_report(self, guild) -> dict:
+        state = await self.b20_get_slo_state(guild)
+        targets = state.get("targets") or {}
+        monitor_state = await self.b16_get_monitor_state(guild) if hasattr(self, "b16_get_monitor_state") else {"checks": {}}
+        checks = monitor_state.get("checks") or {}
+
+        results = []
+
+        for key, target in targets.items():
+            matching = []
+
+            for mon_id, mon in checks.items():
+                hay = " ".join([str(mon.get("name", "")), str(mon.get("target", ""))]).lower()
+                if key in hay:
+                    result = mon.get("last_result")
+                    if result:
+                        matching.append((mon_id, mon, result))
+
+            total = len(matching)
+            ok = sum(1 for _, _, result in matching if result.get("ok"))
+            avg_latency = int(sum(int((result.get("elapsed_ms") or 0)) for _, _, result in matching) / total) if total else 0
+            availability = (ok / total * 100) if total else 0
+            pass_avail = availability >= float(target.get("availability", 99))
+            pass_latency = avg_latency <= int(target.get("latency_ms", 1000)) if total else False
+
+            results.append({
+                "service": target.get("service"),
+                "target": target,
+                "monitors": total,
+                "ok": ok,
+                "availability": round(availability, 2),
+                "avg_latency": avg_latency,
+                "pass": pass_avail and pass_latency,
+                "pass_availability": pass_avail,
+                "pass_latency": pass_latency,
+            })
+
+        report = {
+            "created_at": self.b20_now_iso(),
+            "results": results,
+        }
+
+        history = state.get("history") or []
+        history.append(report)
+        state["history"] = history[-50:]
+        await self.b20_set_slo_state(guild, state)
+
+        return report
+
+    def b20_slo_lines(self, report: dict) -> list[str]:
+        lines = [
+            f"Generated: `{report.get('created_at')}`",
+            "",
+        ]
+
+        results = report.get("results") or []
+
+        if not results:
+            lines.append("No SLO targets configured.")
+            return lines
+
+        for item in results:
+            emoji = "✅" if item.get("pass") else "❌"
+            lines.append(f"{emoji} **{item.get('service')}** — availability `{item.get('availability')}%` / target `{item.get('target', {}).get('availability')}%` — latency `{item.get('avg_latency')}ms` / target `{item.get('target', {}).get('latency_ms')}ms` — monitors `{item.get('monitors')}`")
+
+        return lines
+
+    @slo.command(name="check")
+    async def slo_check(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        report = await self.b20_build_slo_report(ctx.guild)
+        await self.send_paginated(ctx, "SLO Check", self.b20_slo_lines(report))
+
+    @slo.command(name="report")
+    async def slo_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        report = await self.b20_build_slo_report(ctx.guild)
+        await self.send_paginated(ctx, "SLO Report", self.b20_slo_lines(report))
+
+    @slo.command(name="export")
+    async def slo_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        report = await self.b20_build_slo_report(ctx.guild)
+        text = "\n".join([x.replace("**", "") for x in self.b20_slo_lines(report)])
+        fp = io.BytesIO(text.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("SLO report exported", "Exported SLO report."),
+            file=discord.File(fp, filename="mattis-slo-report.txt")
+        )
+
+    # ============================================================
+    # B21 — Customer Impact Registry
+    # ============================================================
+
+    async def b21_get_impact_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("customer_impact_registry") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("records", {})
+        return state
+
+    async def b21_set_impact_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["customer_impact_registry"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b21_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b21_new_id(self, state):
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"IMP-{state['counter']:04d}"
+
+    @mcore.group(name="impact", invoke_without_command=True)
+    async def impact(self, ctx):
+        """Customer impact registry."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Customer Impact Registry**",
+            "",
+            "`!mcore impact add <segment> | <severity> | <details>` — record impact",
+            "`!mcore impact incident <incident> <segment> | <severity> | <details>` — link impact to incident",
+            "`!mcore impact list` — list impact records",
+            "`!mcore impact show <id>` — show impact",
+            "`!mcore impact clear <id> <resolution>` — clear impact",
+            "`!mcore impact export` — export impact report",
+        ]
+
+        await self.send_paginated(ctx, "Customer Impact", lines)
+
+    @impact.command(name="add")
+    async def impact_add(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        segment = parts[0] if len(parts) > 0 else "Unknown"
+        severity = parts[1] if len(parts) > 1 else "medium"
+        details = parts[2] if len(parts) > 2 else ""
+
+        state = await self.b21_get_impact_state(ctx.guild)
+        impact_id = self.b21_new_id(state)
+
+        state.setdefault("records", {})[impact_id] = {
+            "id": impact_id,
+            "segment": segment,
+            "severity": severity.lower(),
+            "details": details,
+            "status": "open",
+            "created_at": self.b21_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b21_set_impact_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Impact recorded", f"`{impact_id}` — {segment}"))
+
+    @impact.command(name="incident")
+    async def impact_incident(self, ctx, incident_query: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        incident_id = incident_query
+
+        if hasattr(self, "b7_find_incident"):
+            found_id, inc, _ = await self.b7_find_incident(ctx.guild, incident_query)
+            if inc:
+                incident_id = found_id
+
+        parts = [x.strip() for x in text.split("|")]
+        segment = parts[0] if len(parts) > 0 else "Unknown"
+        severity = parts[1] if len(parts) > 1 else "medium"
+        details = parts[2] if len(parts) > 2 else ""
+
+        state = await self.b21_get_impact_state(ctx.guild)
+        impact_id = self.b21_new_id(state)
+
+        state.setdefault("records", {})[impact_id] = {
+            "id": impact_id,
+            "segment": segment,
+            "severity": severity.lower(),
+            "details": details,
+            "status": "open",
+            "incident": incident_id,
+            "created_at": self.b21_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b21_set_impact_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Incident impact recorded", f"`{impact_id}` linked to `{incident_id}`."))
+
+    @impact.command(name="list")
+    async def impact_list(self, ctx, mode: str = "open"):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b21_get_impact_state(ctx.guild)
+        records = state.get("records") or {}
+        lines = []
+
+        for impact_id, item in sorted(records.items(), reverse=True):
+            if mode != "all" and item.get("status") != mode:
+                continue
+            lines.append(f"`{impact_id}` — `{item.get('severity')}` `{item.get('status')}` — {item.get('segment')} — {item.get('details')}")
+
+        await self.send_paginated(ctx, "Customer Impact Records", lines or [f"No `{mode}` impact records."])
+
+    @impact.command(name="show")
+    async def impact_show(self, ctx, impact_id: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b21_get_impact_state(ctx.guild)
+        item = (state.get("records") or {}).get(impact_id.upper())
+
+        if not item:
+            await ctx.send(embed=info_embed("Impact not found", f"No impact record matched `{impact_id}`."))
+            return
+
+        lines = [
+            f"**{impact_id.upper()} — {item.get('segment')}**",
+            f"Severity: `{item.get('severity')}`",
+            f"Status: `{item.get('status')}`",
+            f"Incident: `{item.get('incident') or 'none'}`",
+            f"Created: `{item.get('created_at')}`",
+            "",
+            item.get("details") or "No details.",
+        ]
+
+        await self.send_paginated(ctx, "Customer Impact Detail", lines)
+
+    @impact.command(name="clear")
+    async def impact_clear(self, ctx, impact_id: str, *, resolution: str):
+        if not await require_admin(ctx):
+            return
+
+        impact_id = impact_id.upper()
+        state = await self.b21_get_impact_state(ctx.guild)
+        records = state.get("records") or {}
+
+        if impact_id not in records:
+            await ctx.send(embed=info_embed("Impact not found", f"No impact record matched `{impact_id}`."))
+            return
+
+        records[impact_id]["status"] = "resolved"
+        records[impact_id]["resolution"] = resolution
+        records[impact_id]["resolved_at"] = self.b21_now_iso()
+        records[impact_id]["resolved_by"] = str(ctx.author)
+
+        state["records"] = records
+        await self.b21_set_impact_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Impact cleared", f"`{impact_id}` resolved."))
+
+    @impact.command(name="export")
+    async def impact_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b21_get_impact_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "Customer Impact Report", "=" * 40, ""]
+
+        for impact_id, item in sorted((state.get("records") or {}).items()):
+            lines.append(f"{impact_id} — {item.get('severity')} — {item.get('status')} — {item.get('segment')} — {item.get('details')}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Customer impact report exported", "Exported impact report."),
+            file=discord.File(fp, filename="mattis-customer-impact-report.txt")
+        )
+
+    # ============================================================
+    # B22 — Runbook Library
+    # ============================================================
+
+    async def b22_get_runbook_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("runbook_library") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("runbooks", {})
+        return state
+
+    async def b22_set_runbook_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["runbook_library"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b22_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b22_new_id(self, state):
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"RB-{state['counter']:04d}"
+
+    async def b22_find_runbook(self, guild, query: str):
+        state = await self.b22_get_runbook_state(guild)
+        runbooks = state.get("runbooks") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in runbooks:
+            key = q.upper()
+            return key, runbooks[key], state
+
+        for key, item in runbooks.items():
+            hay = " ".join([key, str(item.get("title", "")), str(item.get("category", ""))]).lower()
+            if q in hay:
+                return key, item, state
+
+        return None, None, state
+
+    @mcore.group(name="runbook", invoke_without_command=True)
+    async def runbook(self, ctx):
+        """Runbook library."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Runbook Library**",
+            "",
+            "`!mcore runbook seed` — seed default production runbooks",
+            "`!mcore runbook add <category> <title> | <step1> | <step2>` — add runbook",
+            "`!mcore runbook list` — list runbooks",
+            "`!mcore runbook show <id/query>` — show runbook",
+            "`!mcore runbook step <id/query> <step>` — add step",
+            "`!mcore runbook start <id/query>` — start runbook checklist",
+            "`!mcore runbook export <id/query>` — export runbook",
+        ]
+
+        await self.send_paginated(ctx, "Runbook Library", lines)
+
+    @runbook.command(name="seed")
+    async def runbook_seed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b22_get_runbook_state(ctx.guild)
+        runbooks = state.setdefault("runbooks", {})
+        existing = {str(x.get("title", "")).lower() for x in runbooks.values()}
+
+        defaults = [
+            ("Release", "Production release preflight", ["Run prod readiness", "Run contract check", "Check backup readiness", "Approve release", "Deploy", "Verify monitors"]),
+            ("Incident", "Critical incident response", ["Open incident", "Assign commander", "Document impact", "Run service impact", "Update comms", "Resolve and export evidence"]),
+            ("Backup", "Backup restore verification", ["Create backup", "Restore into test DB", "List tables", "Drop test DB", "Record backup verification"]),
+            ("Security", "Secret rotation review", ["Record secretops rotation", "Check no secrets exposed", "Verify integrations", "Add Security signoff"]),
+        ]
+
+        created = 0
+
+        for category, title, steps in defaults:
+            if title.lower() in existing:
+                continue
+
+            rb_id = self.b22_new_id(state)
+            runbooks[rb_id] = {
+                "id": rb_id,
+                "category": category,
+                "title": title,
+                "steps": steps,
+                "created_at": self.b22_now_iso(),
+                "created_by": str(ctx.author),
+            }
+            created += 1
+
+        state["runbooks"] = runbooks
+        await self.b22_set_runbook_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Runbooks seeded", f"Created `{created}` runbook(s)."))
+
+    @runbook.command(name="add")
+    async def runbook_add(self, ctx, category: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        title = parts[0]
+        steps = parts[1:] or ["No steps yet."]
+
+        state = await self.b22_get_runbook_state(ctx.guild)
+        rb_id = self.b22_new_id(state)
+
+        state.setdefault("runbooks", {})[rb_id] = {
+            "id": rb_id,
+            "category": category.title(),
+            "title": title,
+            "steps": steps,
+            "created_at": self.b22_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b22_set_runbook_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Runbook added", f"`{rb_id}` — {title}"))
+
+    @runbook.command(name="list")
+    async def runbook_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b22_get_runbook_state(ctx.guild)
+        runbooks = state.get("runbooks") or {}
+
+        if not runbooks:
+            await ctx.send(embed=info_embed("Runbooks", "No runbooks yet. Run `!mcore runbook seed`."))
+            return
+
+        lines = [f"`{rb_id}` — `{item.get('category')}` — {item.get('title')}" for rb_id, item in sorted(runbooks.items())]
+        await self.send_paginated(ctx, "Runbooks", lines)
+
+    @runbook.command(name="show")
+    async def runbook_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        rb_id, item, _ = await self.b22_find_runbook(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Runbook not found", f"No runbook matched `{query}`."))
+            return
+
+        lines = [
+            f"**{rb_id} — {item.get('title')}**",
+            f"Category: `{item.get('category')}`",
+            "",
+            "**Steps:**",
+        ]
+
+        for idx, step in enumerate(item.get("steps") or [], start=1):
+            lines.append(f"{idx}. {step}")
+
+        await self.send_paginated(ctx, "Runbook", lines)
+
+    @runbook.command(name="step")
+    async def runbook_step(self, ctx, query: str, *, step: str):
+        if not await require_admin(ctx):
+            return
+
+        rb_id, item, state = await self.b22_find_runbook(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Runbook not found", f"No runbook matched `{query}`."))
+            return
+
+        steps = item.get("steps") or []
+        steps.append(step)
+        item["steps"] = steps
+        item["updated_at"] = self.b22_now_iso()
+        state["runbooks"][rb_id] = item
+
+        await self.b22_set_runbook_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Runbook step added", f"`{rb_id}` updated."))
+
+    @runbook.command(name="start")
+    async def runbook_start(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        rb_id, item, _ = await self.b22_find_runbook(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Runbook not found", f"No runbook matched `{query}`."))
+            return
+
+        lines = [
+            f"**Runbook checklist started: `{rb_id}` — {item.get('title')}**",
+            "",
+        ]
+
+        for idx, step in enumerate(item.get("steps") or [], start=1):
+            lines.append(f"{idx}. ☐ {step}")
+
+        await self.send_paginated(ctx, "Runbook Checklist", lines)
+
+    @runbook.command(name="export")
+    async def runbook_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        rb_id, item, _ = await self.b22_find_runbook(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Runbook not found", f"No runbook matched `{query}`."))
+            return
+
+        lines = [x.replace("**", "") for x in [
+            f"{rb_id} — {item.get('title')}",
+            f"Category: {item.get('category')}",
+            "",
+            "Steps:",
+        ]]
+
+        for idx, step in enumerate(item.get("steps") or [], start=1):
+            lines.append(f"{idx}. {step}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Runbook exported", f"Exported `{rb_id}`."),
+            file=discord.File(fp, filename=f"mattis-runbook-{rb_id.lower()}.txt")
+        )
+
+    # ============================================================
+    # B23 — Security Posture Centre
+    # ============================================================
+
+    @mcore.group(name="posture", invoke_without_command=True)
+    async def posture(self, ctx):
+        """Security posture centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Security Posture Centre**",
+            "",
+            "`!mcore posture report` — full posture report",
+            "`!mcore posture score` — posture score",
+            "`!mcore posture checklist` — security checklist",
+            "`!mcore posture signoff <area> <note>` — posture signoff",
+            "`!mcore posture export` — export posture report",
+        ]
+
+        await self.send_paginated(ctx, "Security Posture", lines)
+
+    async def b23_posture_data(self, guild) -> dict:
+        prod = await self.b5_build_readiness(guild, include_optional=False) if hasattr(self, "b5_build_readiness") else {}
+        backup = await self.b12_backup_readiness(guild) if hasattr(self, "b12_backup_readiness") else {}
+        contracts = await self.b11_check_contracts(guild) if hasattr(self, "b11_check_contracts") else []
+        monitors = await self.b16_get_monitor_state(guild) if hasattr(self, "b16_get_monitor_state") else {"checks": {}}
+
+        return {
+            "prod": prod,
+            "backup": backup,
+            "contracts": contracts,
+            "monitors": monitors,
+        }
+
+    def b23_score(self, data: dict) -> tuple[int, list[str], list[str]]:
+        score = 100
+        blockers = []
+        warnings = []
+
+        prod_readiness = (data.get("prod") or {}).get("readiness") or {}
+        backup_readiness = (data.get("backup") or {}).get("readiness") or {}
+
+        if prod_readiness.get("blockers"):
+            blockers.extend(prod_readiness.get("blockers"))
+            score -= min(40, len(prod_readiness.get("blockers")) * 15)
+
+        if prod_readiness.get("warnings"):
+            warnings.extend(prod_readiness.get("warnings"))
+            score -= min(25, len(prod_readiness.get("warnings")) * 5)
+
+        if backup_readiness.get("blockers"):
+            blockers.extend([f"Backup: {x}" for x in backup_readiness.get("blockers")])
+            score -= min(30, len(backup_readiness.get("blockers")) * 15)
+
+        contract_summary = self.b11_contract_summary(data.get("contracts") or []) if hasattr(self, "b11_contract_summary") else {"required_failed": 0}
+
+        if contract_summary.get("required_failed"):
+            blockers.append(f"{contract_summary.get('required_failed')} required API contract(s) failed.")
+            score -= 20
+
+        monitor_checks = (data.get("monitors") or {}).get("checks") or {}
+        failed_critical = 0
+
+        for _, mon in monitor_checks.items():
+            result = mon.get("last_result") or {}
+            if mon.get("critical") and result and not result.get("ok") and not mon.get("silenced"):
+                failed_critical += 1
+
+        if failed_critical:
+            blockers.append(f"{failed_critical} critical monitor(s) failing.")
+            score -= min(35, failed_critical * 15)
+
+        return max(0, score), blockers, warnings
+
+    def b23_report_lines(self, data: dict) -> list[str]:
+        score, blockers, warnings = self.b23_score(data)
+        prod_readiness = (data.get("prod") or {}).get("readiness") or {}
+        backup_readiness = (data.get("backup") or {}).get("readiness") or {}
+        contract_summary = self.b11_contract_summary(data.get("contracts") or []) if hasattr(self, "b11_contract_summary") else {"ok": 0, "total": 0, "required_failed": 0}
+
+        lines = [
+            "**Security Posture Report**",
+            "",
+            f"Posture score: `{score}/100`",
+            f"Production readiness: `{prod_readiness.get('label', 'Unknown')}` `{prod_readiness.get('score', 'Unknown')}/100`",
+            f"Backup readiness: `{backup_readiness.get('label', 'Unknown')}` `{backup_readiness.get('score', 'Unknown')}/100`",
+            f"API contracts: `{contract_summary.get('ok')}/{contract_summary.get('total')}` OK | required failed `{contract_summary.get('required_failed')}`",
+            "",
+            "**Blockers:**",
+        ]
+
+        if blockers:
+            for item in blockers:
+                lines.append(f"- 🚫 {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Warnings:**"])
+
+        if warnings:
+            for item in warnings[:15]:
+                lines.append(f"- ⚠️ {item}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    @posture.command(name="report")
+    async def posture_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b23_posture_data(ctx.guild)
+        await self.send_paginated(ctx, "Security Posture Report", self.b23_report_lines(data))
+
+    @posture.command(name="score")
+    async def posture_score(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b23_posture_data(ctx.guild)
+        score, blockers, warnings = self.b23_score(data)
+        await ctx.send(embed=ok_embed("Security posture score", f"Score: `{score}/100`\nBlockers: `{len(blockers)}`\nWarnings: `{len(warnings)}`"))
+
+    @posture.command(name="checklist")
+    async def posture_checklist(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Security posture checklist**",
+            "",
+            "☐ Critical monitors passing",
+            "☐ Required API contracts passing",
+            "☐ Backup verification and restore test recorded",
+            "☐ Secrets reviewed and no values exposed",
+            "☐ Active critical/high incidents resolved or release-approved",
+            "☐ Release approvals recorded",
+            "☐ Evidence linked to releases/incidents",
+            "☐ Customer impact documented where relevant",
+        ]
+
+        await self.send_paginated(ctx, "Security Posture Checklist", lines)
+
+    @posture.command(name="signoff")
+    async def posture_signoff(self, ctx, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        await ctx.invoke(self.evidence_add, evidence_type="posture", text=f"{area} signoff | {note}")
+    
+    @posture.command(name="export")
+    async def posture_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b23_posture_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b23_report_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Security posture report exported", "Exported security posture report."),
+            file=discord.File(fp, filename="mattis-security-posture-report.txt")
+        )
+
+    # ============================================================
+    # B24 — Secret Rotation Ledger
+    # ============================================================
+
+    async def b24_get_secret_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("secret_rotation_ledger") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("records", {})
+        return state
+
+    async def b24_set_secret_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["secret_rotation_ledger"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b24_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b24_new_id(self, state):
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"SEC-{state['counter']:04d}"
+
+    @mcore.group(name="secretops", invoke_without_command=True)
+    async def secretops(self, ctx):
+        """Secret rotation ledger. Never stores secret values."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Secret Rotation Ledger**",
+            "",
+            "`!mcore secretops record <name> | <system> | <reason>` — record rotation/review",
+            "`!mcore secretops list` — list records",
+            "`!mcore secretops signoff <id> <area> <note>` — add signoff",
+            "`!mcore secretops plan <system>` — rotation plan",
+            "`!mcore secretops export` — export ledger",
+            "",
+            "Never paste actual secret values.",
+        ]
+
+        await self.send_paginated(ctx, "Secret Rotation Ledger", lines)
+
+    @secretops.command(name="record")
+    async def secretops_record(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "unknown"
+        system = parts[1] if len(parts) > 1 else "unknown"
+        reason = parts[2] if len(parts) > 2 else "No reason."
+
+        state = await self.b24_get_secret_state(ctx.guild)
+        secret_id = self.b24_new_id(state)
+
+        state.setdefault("records", {})[secret_id] = {
+            "id": secret_id,
+            "name": name,
+            "system": system,
+            "reason": reason,
+            "created_at": self.b24_now_iso(),
+            "created_by": str(ctx.author),
+            "signoffs": {},
+            "status": "recorded",
+        }
+
+        await self.b24_set_secret_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Secret rotation recorded", f"`{secret_id}` — `{name}` for `{system}`. No secret value stored."))
+
+    @secretops.command(name="list")
+    async def secretops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b24_get_secret_state(ctx.guild)
+        records = state.get("records") or {}
+
+        if not records:
+            await ctx.send(embed=info_embed("Secret Ledger", "No secret records yet."))
+            return
+
+        lines = [f"`{rid}` — `{item.get('system')}` — `{item.get('name')}` — {item.get('status')}" for rid, item in sorted(records.items(), reverse=True)]
+        await self.send_paginated(ctx, "Secret Rotation Ledger", lines)
+
+    @secretops.command(name="signoff")
+    async def secretops_signoff(self, ctx, record_id: str, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        record_id = record_id.upper()
+        state = await self.b24_get_secret_state(ctx.guild)
+        records = state.get("records") or {}
+
+        if record_id not in records:
+            await ctx.send(embed=info_embed("Secret record not found", f"No record matched `{record_id}`."))
+            return
+
+        signoffs = records[record_id].get("signoffs") or {}
+        signoffs[area.title()] = {
+            "by": str(ctx.author),
+            "at": self.b24_now_iso(),
+            "note": note,
+        }
+        records[record_id]["signoffs"] = signoffs
+        records[record_id]["status"] = "signed-off"
+        state["records"] = records
+
+        await self.b24_set_secret_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Secret record signed off", f"`{record_id}` signed off for `{area.title()}`."))
+
+    @secretops.command(name="plan")
+    async def secretops_plan(self, ctx, *, system: str):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            f"**Secret rotation plan for `{system}`**",
+            "",
+            "1. Identify exact secret/key name. Do not post the value.",
+            "2. Generate replacement in the provider dashboard.",
+            "3. Update `/opt/mattis/.env` or secure secret store.",
+            "4. Restart only affected service.",
+            "5. Verify integration health.",
+            "6. Disable old secret where provider supports it.",
+            "7. Record with `!mcore secretops record <name> | <system> | <reason>`.",
+            "8. Add Security/Ops signoff.",
+        ]
+
+        await self.send_paginated(ctx, "Secret Rotation Plan", lines)
+
+    @secretops.command(name="export")
+    async def secretops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b24_get_secret_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "Secret Rotation Ledger", "=" * 40, "", "No secret values are stored in this report.", ""]
+
+        for rid, item in sorted((state.get("records") or {}).items()):
+            lines.append(f"{rid} — {item.get('system')} — {item.get('name')} — {item.get('status')} — {item.get('reason')}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Secret ledger exported", "Exported secret rotation ledger."),
+            file=discord.File(fp, filename="mattis-secret-rotation-ledger.txt")
+        )
+
+    # ============================================================
+    # B25 — Config / Env Compliance
+    # ============================================================
+
+    async def b25_get_config_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("config_compliance_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("required", ["DATABASE_URL", "REDIS_URL", "MATTIS_BOT_API_TOKEN", "DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "ROBLOX_CLIENT_ID", "ROBLOX_CLIENT_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"])
+        state.setdefault("verified", {})
+        return state
+
+    async def b25_set_config_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["config_compliance_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b25_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    @mcore.group(name="configops", invoke_without_command=True)
+    async def configops(self, ctx):
+        """Configuration and env compliance."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Config / Env Compliance Centre**",
+            "",
+            "`!mcore configops required` — list required keys",
+            "`!mcore configops require <KEY>` — add required key",
+            "`!mcore configops verify <KEY> <note>` — mark key verified without exposing value",
+            "`!mcore configops checklist` — safe .env check commands",
+            "`!mcore configops report` — compliance report",
+            "`!mcore configops export` — export config compliance report",
+        ]
+
+        await self.send_paginated(ctx, "Config Compliance", lines)
+
+    @configops.command(name="required")
+    async def configops_required(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b25_get_config_state(ctx.guild)
+        lines = [f"- `{key}`" for key in state.get("required") or []]
+        await self.send_paginated(ctx, "Required Config Keys", lines)
+
+    @configops.command(name="require")
+    async def configops_require(self, ctx, key: str):
+        if not await require_admin(ctx):
+            return
+
+        key = key.upper()
+        state = await self.b25_get_config_state(ctx.guild)
+        required = state.get("required") or []
+
+        if key not in required:
+            required.append(key)
+
+        state["required"] = required
+        await self.b25_set_config_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Required config key added", f"`{key}` is now required."))
+
+    @configops.command(name="verify")
+    async def configops_verify(self, ctx, key: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        key = key.upper()
+        state = await self.b25_get_config_state(ctx.guild)
+        verified = state.get("verified") or {}
+        verified[key] = {
+            "at": self.b25_now_iso(),
+            "by": str(ctx.author),
+            "note": note,
+        }
+        state["verified"] = verified
+
+        await self.b25_set_config_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Config key verified", f"`{key}` verified. No value stored."))
+
+    @configops.command(name="checklist")
+    async def configops_checklist(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        if hasattr(self, "b6_envcheck_lines"):
+            lines = self.b6_envcheck_lines()
+        else:
+            lines = [
+                "Safe env check:",
+                "```bash",
+                "sudo bash -lc \"cut -d= -f1 /opt/mattis/.env | sort\"",
+                "```",
+            ]
+
+        await self.send_paginated(ctx, "Config Checklist", lines)
+
+    def b25_report_lines(self, state: dict) -> list[str]:
+        required = state.get("required") or []
+        verified = state.get("verified") or {}
+        lines = [
+            "**Config Compliance Report**",
+            "",
+            f"Required keys: `{len(required)}`",
+            f"Verified keys: `{len(verified)}`",
+            "",
+        ]
+
+        for key in required:
+            if key in verified:
+                lines.append(f"✅ `{key}` — verified by `{verified[key].get('by')}` at `{verified[key].get('at')}`")
+            else:
+                lines.append(f"☐ `{key}` — not verified")
+
+        return lines
+
+    @configops.command(name="report")
+    async def configops_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b25_get_config_state(ctx.guild)
+        await self.send_paginated(ctx, "Config Compliance Report", self.b25_report_lines(state))
+
+    @configops.command(name="export")
+    async def configops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b25_get_config_state(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b25_report_lines(state)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Config report exported", "Exported config compliance report."),
+            file=discord.File(fp, filename="mattis-config-compliance-report.txt")
+        )
+
+    # ============================================================
+    # B26 — Database Operations Centre
+    # ============================================================
+
+    async def b26_get_db_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("database_ops_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("checks", [])
+        state.setdefault("signoffs", {})
+        return state
+
+    async def b26_set_db_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["database_ops_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b26_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    @mcore.group(name="dbops", invoke_without_command=True)
+    async def dbops(self, ctx):
+        """Database operations centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Database Operations Centre**",
+            "",
+            "`!mcore dbops commands` — safe DB inspection commands",
+            "`!mcore dbops backup` — backup commands",
+            "`!mcore dbops restore-plan` — restore plan",
+            "`!mcore dbops verify <note>` — record DB verification",
+            "`!mcore dbops signoff <area> <note>` — DB signoff",
+            "`!mcore dbops report` — DB ops report",
+            "`!mcore dbops export` — export DB report",
+        ]
+
+        await self.send_paginated(ctx, "Database Ops", lines)
+
+    @dbops.command(name="commands")
+    async def dbops_commands(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Safe Postgres inspection commands**",
+            "```bash",
+            "sudo -iu deploy bash -lc 'set -a; source /opt/mattis/.env; set +a; psql \"$DATABASE_URL\" -c \"select now();\"'",
+            "sudo -iu deploy bash -lc 'set -a; source /opt/mattis/.env; set +a; psql \"$DATABASE_URL\" -c \"\\dt\"'",
+            "```",
+            "Do not paste database URLs or secret values into Discord.",
+        ]
+
+        await self.send_paginated(ctx, "DB Commands", lines)
+
+    @dbops.command(name="backup")
+    async def dbops_backup(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = self.b6_backup_plan_lines() if hasattr(self, "b6_backup_plan_lines") else ["Backup plan helper unavailable."]
+        await self.send_paginated(ctx, "DB Backup Commands", lines)
+
+    @dbops.command(name="restore-plan")
+    async def dbops_restore_plan(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**DB restore plan**",
+            "",
+            "1. Confirm backup file exists.",
+            "2. Restore into a test database first.",
+            "3. Verify schema/tables.",
+            "4. Only restore production if rollback requires database rollback.",
+            "5. Take a fresh pre-restore backup first.",
+        ]
+
+        await self.send_paginated(ctx, "DB Restore Plan", lines)
+
+    @dbops.command(name="verify")
+    async def dbops_verify(self, ctx, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b26_get_db_state(ctx.guild)
+        checks = state.get("checks") or []
+        checks.append({"at": self.b26_now_iso(), "by": str(ctx.author), "note": note})
+        state["checks"] = checks[-50:]
+        await self.b26_set_db_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("DB verification recorded", note))
+
+    @dbops.command(name="signoff")
+    async def dbops_signoff(self, ctx, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b26_get_db_state(ctx.guild)
+        signoffs = state.get("signoffs") or {}
+        signoffs[area.title()] = {"at": self.b26_now_iso(), "by": str(ctx.author), "note": note}
+        state["signoffs"] = signoffs
+        await self.b26_set_db_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("DB signoff recorded", f"{area.title()} signoff recorded."))
+
+    def b26_report_lines(self, state: dict) -> list[str]:
+        lines = ["**Database Operations Report**", "", "**Checks:**"]
+        checks = state.get("checks") or []
+
+        if checks:
+            for item in checks[-20:]:
+                lines.append(f"- `{item.get('at')}` by `{item.get('by')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Signoffs:**"])
+        signoffs = state.get("signoffs") or {}
+
+        if signoffs:
+            for area, item in signoffs.items():
+                lines.append(f"- `{area}` by `{item.get('by')}` at `{item.get('at')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    @dbops.command(name="report")
+    async def dbops_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b26_get_db_state(ctx.guild)
+        await self.send_paginated(ctx, "DB Ops Report", self.b26_report_lines(state))
+
+    @dbops.command(name="export")
+    async def dbops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b26_get_db_state(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b26_report_lines(state)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("DB report exported", "Exported DB operations report."),
+            file=discord.File(fp, filename="mattis-db-ops-report.txt")
+        )
+
+    # ============================================================
+    # B27 — Redis / Cache Operations Centre
+    # ============================================================
+
+    @mcore.group(name="cacheops", invoke_without_command=True)
+    async def cacheops(self, ctx):
+        """Redis/cache operations centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Redis / Cache Operations Centre**",
+            "",
+            "`!mcore cacheops commands` — safe Redis commands",
+            "`!mcore cacheops checklist` — cache troubleshooting checklist",
+            "`!mcore cacheops flush-plan` — safe flush plan",
+            "`!mcore cacheops export` — export cache runbook",
+        ]
+
+        await self.send_paginated(ctx, "Cache Ops", lines)
+
+    @cacheops.command(name="commands")
+    async def cacheops_commands(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Safe Redis checks**",
+            "```bash",
+            "redis-cli ping || true",
+            "redis-cli info memory | head -40 || true",
+            "redis-cli dbsize || true",
+            "```",
+            "If using Redis URL from `.env`, do not paste it into Discord.",
+        ]
+
+        await self.send_paginated(ctx, "Cache Commands", lines)
+
+    @cacheops.command(name="checklist")
+    async def cacheops_checklist(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Cache troubleshooting checklist**",
+            "",
+            "☐ Redis responds to ping.",
+            "☐ Memory usage is healthy.",
+            "☐ API can connect to Redis.",
+            "☐ No cache flush unless planned.",
+            "☐ Restart only affected service after Redis changes.",
+        ]
+
+        await self.send_paginated(ctx, "Cache Checklist", lines)
+
+    @cacheops.command(name="flush-plan")
+    async def cacheops_flush_plan(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Safe cache flush plan**",
+            "",
+            "1. Confirm customer impact.",
+            "2. Confirm DB is healthy.",
+            "3. Enable maintenance or freeze if needed.",
+            "4. Flush only targeted keys when possible.",
+            "5. Restart affected service.",
+            "6. Monitor API and customer flows.",
+            "",
+            "Avoid `FLUSHALL` unless absolutely required.",
+        ]
+
+        await self.send_paginated(ctx, "Cache Flush Plan", lines)
+
+    @cacheops.command(name="export")
+    async def cacheops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        report = "\n".join([
+            "Mattis CMS | Systems",
+            "Cache Operations Runbook",
+            "=" * 40,
+            "",
+            "Use !mcore cacheops commands/checklist/flush-plan for live runbooks.",
+        ])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Cache report exported", "Exported cache operations report."),
+            file=discord.File(fp, filename="mattis-cache-ops-report.txt")
+        )
+
+    # ============================================================
+    # B28 — Webhook Operations Centre
+    # ============================================================
+
+    async def b28_get_webhook_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("webhook_operations_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("records", {})
+        return state
+
+    async def b28_set_webhook_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["webhook_operations_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b28_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    @mcore.group(name="webhook", invoke_without_command=True)
+    async def webhook(self, ctx):
+        """Webhook operations centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Webhook Operations Centre**",
+            "",
+            "`!mcore webhook seed` — seed known webhook checks",
+            "`!mcore webhook list` — list webhooks",
+            "`!mcore webhook verify <name> <note>` — record verification",
+            "`!mcore webhook plan <name>` — verification plan",
+            "`!mcore webhook export` — export webhook report",
+        ]
+
+        await self.send_paginated(ctx, "Webhook Ops", lines)
+
+    @webhook.command(name="seed")
+    async def webhook_seed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b28_get_webhook_state(ctx.guild)
+        records = state.setdefault("records", {})
+
+        for name, system in [("stripe_webhook", "Stripe"), ("roblox_webhook", "Roblox"), ("discord_interactions", "Discord")]:
+            records.setdefault(name, {"name": name, "system": system, "status": "unverified"})
+
+        state["records"] = records
+        await self.b28_set_webhook_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Webhooks seeded", "Known webhook records seeded."))
+
+    @webhook.command(name="list")
+    async def webhook_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b28_get_webhook_state(ctx.guild)
+        records = state.get("records") or {}
+        lines = [f"`{name}` — `{item.get('system')}` — `{item.get('status')}`" for name, item in sorted(records.items())]
+        await self.send_paginated(ctx, "Webhook Records", lines or ["No webhook records."])
+
+    @webhook.command(name="verify")
+    async def webhook_verify(self, ctx, name: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b28_get_webhook_state(ctx.guild)
+        records = state.setdefault("records", {})
+        item = records.setdefault(name, {"name": name, "system": "Unknown"})
+        item["status"] = "verified"
+        item["verified_at"] = self.b28_now_iso()
+        item["verified_by"] = str(ctx.author)
+        item["note"] = note
+        records[name] = item
+        state["records"] = records
+
+        await self.b28_set_webhook_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Webhook verified", f"`{name}` verification recorded."))
+
+    @webhook.command(name="plan")
+    async def webhook_plan(self, ctx, *, name: str):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            f"**Webhook verification plan for `{name}`**",
+            "",
+            "1. Confirm endpoint URL in provider dashboard.",
+            "2. Confirm signing secret in API env.",
+            "3. Send provider test event if available.",
+            "4. Confirm API received and validated signature.",
+            "5. Confirm no secret value was posted to Discord/GitHub.",
+            f"6. Record with `!mcore webhook verify {name} <note>`.",
+        ]
+
+        await self.send_paginated(ctx, "Webhook Verification Plan", lines)
+
+    @webhook.command(name="export")
+    async def webhook_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b28_get_webhook_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "Webhook Operations Report", "=" * 40, ""]
+
+        for name, item in sorted((state.get("records") or {}).items()):
+            lines.append(f"{name} — {item.get('system')} — {item.get('status')} — {item.get('note', '')}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Webhook report exported", "Exported webhook report."),
+            file=discord.File(fp, filename="mattis-webhook-ops-report.txt")
+        )
+
+    # ============================================================
+    # B29 — OAuth Integration Centre
+    # ============================================================
+
+    async def b29_get_oauth_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("oauth_integration_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("providers", {})
+        return state
+
+    async def b29_set_oauth_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["oauth_integration_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b29_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    @mcore.group(name="oauth", invoke_without_command=True)
+    async def oauth(self, ctx):
+        """OAuth integration centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**OAuth Integration Centre**",
+            "",
+            "`!mcore oauth seed` — seed Discord/Roblox OAuth providers",
+            "`!mcore oauth list` — list providers",
+            "`!mcore oauth verify <provider> <note>` — record verification",
+            "`!mcore oauth checklist <provider>` — OAuth checklist",
+            "`!mcore oauth export` — export OAuth report",
+        ]
+
+        await self.send_paginated(ctx, "OAuth Centre", lines)
+
+    @oauth.command(name="seed")
+    async def oauth_seed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b29_get_oauth_state(ctx.guild)
+        providers = state.setdefault("providers", {})
+
+        providers.setdefault("discord", {"provider": "discord", "status": "unverified", "callback": "https://api.mattisproductions.com/auth/discord/callback"})
+        providers.setdefault("roblox", {"provider": "roblox", "status": "unverified", "callback": "https://api.mattisproductions.com/auth/roblox/callback"})
+
+        state["providers"] = providers
+        await self.b29_set_oauth_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("OAuth providers seeded", "Discord and Roblox OAuth provider records seeded."))
+
+    @oauth.command(name="list")
+    async def oauth_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b29_get_oauth_state(ctx.guild)
+        providers = state.get("providers") or {}
+        lines = [f"`{name}` — `{item.get('status')}` — callback `{item.get('callback')}`" for name, item in sorted(providers.items())]
+        await self.send_paginated(ctx, "OAuth Providers", lines or ["No OAuth providers."])
+
+    @oauth.command(name="verify")
+    async def oauth_verify(self, ctx, provider: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        provider = provider.lower()
+        state = await self.b29_get_oauth_state(ctx.guild)
+        providers = state.setdefault("providers", {})
+        item = providers.setdefault(provider, {"provider": provider})
+        item["status"] = "verified"
+        item["verified_at"] = self.b29_now_iso()
+        item["verified_by"] = str(ctx.author)
+        item["note"] = note
+        providers[provider] = item
+        state["providers"] = providers
+
+        await self.b29_set_oauth_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("OAuth provider verified", f"`{provider}` verification recorded."))
+
+    @oauth.command(name="checklist")
+    async def oauth_checklist(self, ctx, provider: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            f"**OAuth checklist for `{provider}`**",
+            "",
+            "☐ Client ID exists in `.env`.",
+            "☐ Client secret exists in `.env`.",
+            "☐ Redirect URI exactly matches provider dashboard.",
+            "☐ Callback endpoint works.",
+            "☐ Login flow tested.",
+            "☐ No client secret exposed in Discord/GitHub/screenshots.",
+        ]
+
+        await self.send_paginated(ctx, "OAuth Checklist", lines)
+
+    @oauth.command(name="export")
+    async def oauth_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b29_get_oauth_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "OAuth Integration Report", "=" * 40, ""]
+
+        for name, item in sorted((state.get("providers") or {}).items()):
+            lines.append(f"{name} — {item.get('status')} — {item.get('callback')} — {item.get('note', '')}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("OAuth report exported", "Exported OAuth integration report."),
+            file=discord.File(fp, filename="mattis-oauth-report.txt")
+        )
+
+    # ============================================================
+    # B30 — Retention / Audit Policy Centre
+    # ============================================================
+
+    async def b30_get_retention_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get("retention_policy_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("policies", {
+            "audit_logs": {"days": 365, "reason": "Security and operational audit trail."},
+            "backups": {"days": 14, "reason": "Short-term recovery."},
+            "incident_reports": {"days": 730, "reason": "Operational evidence and postmortems."},
+            "release_reports": {"days": 730, "reason": "Release governance."},
+        })
+
+        return state
+
+    async def b30_set_retention_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["retention_policy_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    @mcore.group(name="retention", invoke_without_command=True)
+    async def retention(self, ctx):
+        """Retention and audit policy centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Retention / Audit Policy Centre**",
+            "",
+            "`!mcore retention show` — show policies",
+            "`!mcore retention set <area> <days> <reason>` — set policy",
+            "`!mcore retention cleanup-plan` — cleanup plan",
+            "`!mcore retention export` — export retention policy",
+        ]
+
+        await self.send_paginated(ctx, "Retention Policy", lines)
+
+    @retention.command(name="show")
+    async def retention_show(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b30_get_retention_state(ctx.guild)
+        lines = []
+
+        for area, item in sorted((state.get("policies") or {}).items()):
+            lines.append(f"`{area}` — `{item.get('days')}` days — {item.get('reason')}")
+
+        await self.send_paginated(ctx, "Retention Policies", lines)
+
+    @retention.command(name="set")
+    async def retention_set(self, ctx, area: str, days: int, *, reason: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b30_get_retention_state(ctx.guild)
+        state.setdefault("policies", {})[area] = {
+            "days": int(days),
+            "reason": reason,
+            "updated_by": str(ctx.author),
+        }
+
+        await self.b30_set_retention_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Retention policy updated", f"`{area}` set to `{days}` days."))
+
+    @retention.command(name="cleanup-plan")
+    async def retention_cleanup_plan(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Retention cleanup plan**",
+            "",
+            "1. Export required evidence before deleting anything.",
+            "2. Never delete active incident/release records.",
+            "3. Backups should be pruned by cron, not Discord.",
+            "4. Audit logs should be pruned only if policy allows.",
+            "5. Keep evidence packs for releases/incidents longer than raw logs.",
+        ]
+
+        await self.send_paginated(ctx, "Retention Cleanup Plan", lines)
+
+    @retention.command(name="export")
+    async def retention_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b30_get_retention_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "Retention Policy", "=" * 40, ""]
+
+        for area, item in sorted((state.get("policies") or {}).items()):
+            lines.append(f"{area} — {item.get('days')} days — {item.get('reason')}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Retention policy exported", "Exported retention policy."),
+            file=discord.File(fp, filename="mattis-retention-policy.txt")
+        )
+
+    # ============================================================
+    # B31 — Executive Board Reporting Pack
+    # ============================================================
+
+    @mcore.group(name="board", invoke_without_command=True)
+    async def board(self, ctx):
+        """Executive board reporting pack."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Executive Board Reporting Pack**",
+            "",
+            "`!mcore board report` — full executive report",
+            "`!mcore board risks` — executive risks",
+            "`!mcore board score` — production/ops score",
+            "`!mcore board export` — export board report",
+        ]
+
+        await self.send_paginated(ctx, "Board Reporting", lines)
+
+    async def b31_board_data(self, guild) -> dict:
+        data = {}
+
+        if hasattr(self, "b9_build_ops_snapshot"):
+            data["ops"] = await self.b9_build_ops_snapshot(guild)
+
+        if hasattr(self, "b23_posture_data"):
+            posture = await self.b23_posture_data(guild)
+            score, blockers, warnings = self.b23_score(posture)
+            data["posture"] = {"score": score, "blockers": blockers, "warnings": warnings}
+
+        if hasattr(self, "b12_backup_readiness"):
+            data["backup"] = await self.b12_backup_readiness(guild)
+
+        if hasattr(self, "b20_build_slo_report"):
+            data["slo"] = await self.b20_build_slo_report(guild)
+
+        return data
+
+    def b31_board_lines(self, data: dict) -> list[str]:
+        ops = data.get("ops") or {}
+        readiness = ops.get("prod_readiness") or {}
+        incidents = ops.get("incidents") or {}
+        alerts = ops.get("alerts") or {}
+        security = ops.get("security") or {}
+        posture = data.get("posture") or {}
+        backup = (data.get("backup") or {}).get("readiness") or {}
+
+        lines = [
+            "**Executive Board Report**",
+            "",
+            f"Production readiness: `{readiness.get('label', 'Unknown')}` `{readiness.get('score', 'Unknown')}/100`",
+            f"Security posture score: `{posture.get('score', 'Unknown')}/100`",
+            f"Backup readiness: `{backup.get('label', 'Unknown')}` `{backup.get('score', 'Unknown')}/100`",
+            f"Active incidents: `{incidents.get('open', 0)}`",
+            f"Active critical/high incidents: `{incidents.get('active_critical_high', 0)}`",
+            f"Open alerts: `{alerts.get('open', 0)}`",
+            f"High-risk audit events: `{security.get('highrisk_events', 0)}`",
+            f"Secret/token/webhook audit events: `{security.get('secret_events', 0)}`",
+            "",
+            "**Executive blockers:**",
+        ]
+
+        blockers = readiness.get("blockers") or []
+        blockers += posture.get("blockers") or []
+
+        if blockers:
+            for item in blockers[:12]:
+                lines.append(f"- 🚫 {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Executive warnings:**"])
+
+        warnings = readiness.get("warnings") or []
+        warnings += posture.get("warnings") or []
+
+        if warnings:
+            for item in warnings[:15]:
+                lines.append(f"- ⚠️ {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend([
+            "",
+            "**Suggested leadership actions:**",
+            "1. Keep production releases gated by `!mcore release preflight`.",
+            "2. Keep evidence packs linked to releases and incidents.",
+            "3. Keep backup restore tests current.",
+            "4. Remove or fix optional API route drift when the API supports it.",
+            "5. Review high-risk audit noise and reduce repeated expected events.",
+        ])
+
+        return lines
+
+    @board.command(name="report")
+    async def board_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b31_board_data(ctx.guild)
+        await self.send_paginated(ctx, "Executive Board Report", self.b31_board_lines(data))
+
+    @board.command(name="risks")
+    async def board_risks(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b31_board_data(ctx.guild)
+        lines = self.b31_board_lines(data)
+        start = 0
+        for idx, line in enumerate(lines):
+            if "Executive blockers" in line:
+                start = idx
+                break
+
+        await self.send_paginated(ctx, "Executive Risks", lines[start:])
+
+    @board.command(name="score")
+    async def board_score(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b31_board_data(ctx.guild)
+        ops = data.get("ops") or {}
+        readiness = ops.get("prod_readiness") or {}
+        posture = data.get("posture") or {}
+        backup = (data.get("backup") or {}).get("readiness") or {}
+
+        await ctx.send(embed=ok_embed(
+            "Executive Scores",
+            f"Production: `{readiness.get('score', 'Unknown')}/100`\nSecurity posture: `{posture.get('score', 'Unknown')}/100`\nBackup: `{backup.get('score', 'Unknown')}/100`"
+        ))
+
+    @board.command(name="export")
+    async def board_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b31_board_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b31_board_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Board report exported", "Exported executive board report."),
+            file=discord.File(fp, filename="mattis-executive-board-report.txt")
+        )
+
     @mcore.group(name="service", invoke_without_command=True)
     async def service(self, ctx):
         """Service catalogue and dependency map."""
@@ -2876,6 +4751,8 @@ class MattisCore(commands.Cog):
 
         return None, None, state
 
+
+
     async def b16_run_one_monitor(self, guild, monitor_id: str, check: dict) -> dict:
         import aiohttp
         import time
@@ -2897,12 +4774,15 @@ class MattisCore(commands.Cog):
 
         if target.startswith("/") and hasattr(self, "b5_http_get"):
             result = await self.b5_http_get(guild, target, timeout_seconds=10)
+            status = int(result.get("status", 0) or 0)
+
             return {
                 "id": monitor_id,
                 "name": check.get("name"),
                 "target": target,
-                "ok": bool(result.get("ok")),
-                "status": result.get("status"),
+                "ok": status == expected,
+                "status": status,
+                "expected_status": expected,
                 "elapsed_ms": result.get("elapsed_ms"),
                 "message": result.get("error") or result.get("text_preview") or "OK",
                 "at": self.b16_now_iso(),
@@ -2924,6 +4804,7 @@ class MattisCore(commands.Cog):
                         "target": target,
                         "ok": resp.status == expected,
                         "status": resp.status,
+                        "expected_status": expected,
                         "elapsed_ms": elapsed_ms,
                         "message": str(text or "")[:250] if resp.status != expected else "OK",
                         "at": self.b16_now_iso(),
@@ -2938,6 +4819,7 @@ class MattisCore(commands.Cog):
                 "target": target,
                 "ok": False,
                 "status": 0,
+                "expected_status": expected,
                 "elapsed_ms": elapsed_ms,
                 "message": f"{type(e).__name__}: {e}",
                 "at": self.b16_now_iso(),
@@ -3034,6 +4916,96 @@ class MattisCore(commands.Cog):
 
         await self.send_paginated(ctx, "Monitoring Centre", lines)
 
+
+    @monitor.command(name="expect")
+    async def monitor_expect(self, ctx, query: str, status: int):
+        """Set expected HTTP status for a monitor."""
+        if not await require_admin(ctx):
+            return
+
+        monitor_id, item, state = await self.b16_find_monitor(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Monitor not found", f"No monitor matched `{query}`."))
+            return
+
+        item["expected_status"] = int(status)
+        item["updated_at"] = self.b16_now_iso()
+        item["updated_by"] = str(ctx.author)
+        state["checks"][monitor_id] = item
+
+        await self.b16_set_monitor_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Monitor expected status updated", f"`{monitor_id}` now expects HTTP `{status}`."))
+
+    @monitor.command(name="critical")
+    async def monitor_critical(self, ctx, query: str, mode: str = "yes"):
+        """Set monitor critical true/false."""
+        if not await require_admin(ctx):
+            return
+
+        monitor_id, item, state = await self.b16_find_monitor(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Monitor not found", f"No monitor matched `{query}`."))
+            return
+
+        critical = str(mode or "yes").lower() in ["yes", "true", "critical", "high", "1", "on"]
+        item["critical"] = critical
+        item["updated_at"] = self.b16_now_iso()
+        item["updated_by"] = str(ctx.author)
+        state["checks"][monitor_id] = item
+
+        await self.b16_set_monitor_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Monitor criticality updated", f"`{monitor_id}` critical: `{critical}`."))
+
+    @monitor.command(name="failure-incident")
+    async def monitor_failure_incident(self, ctx, *, query: str = "all"):
+        """Open incident from failed critical monitors."""
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b16_run_monitors(ctx.guild, query)
+        failed = [x for x in results if not x.get("ok") and x.get("critical") and not x.get("silenced")]
+
+        if not failed:
+            await ctx.send(embed=ok_embed("Monitor incident bridge", "No failed unsilenced critical monitors found."))
+            return
+
+        if not hasattr(self, "b7_get_incident_state"):
+            await ctx.send(embed=error_embed("Incident system unavailable", "Incident helpers are not available."))
+            return
+
+        state = await self.b7_get_incident_state(ctx.guild)
+        incident_id = self.b7_new_incident_id(state)
+
+        title = f"Critical monitor failure: {len(failed)} failed check(s)"
+        details = "; ".join([f"{x.get('id')} {x.get('name')} HTTP {x.get('status')}" for x in failed[:8]])
+
+        inc = {
+            "id": incident_id,
+            "title": title,
+            "severity": "high",
+            "status": "open",
+            "owner": "Ops",
+            "impact": "Possible service impact from failed critical synthetic checks.",
+            "customer_impact": "Possible service impact if affected endpoints are customer-facing.",
+            "internal_impact": "Critical monitoring checks failed and require review.",
+            "current_status": details,
+            "next_action": "Review monitor failures, API logs, VPS health, and recent deployments.",
+            "created_at": self.b7_now_iso(),
+            "updated_at": self.b7_now_iso(),
+            "opened_by": str(ctx.author),
+            "timeline": [],
+            "resolution": "",
+            "linked_monitor_query": query,
+        }
+
+        inc = self.b7_add_timeline(inc, "opened_from_monitor_failure", self.b7_actor(ctx), details)
+        state["incidents"][incident_id] = inc
+        await self.b7_set_incident_state(ctx.guild, state)
+
+        await self.send_paginated(ctx, "Incident Created From Monitor Failure", self.b7_incident_summary_lines(incident_id, inc))
+
     @monitor.command(name="seed")
     async def monitor_seed(self, ctx):
         if not await require_admin(ctx):
@@ -3077,6 +5049,8 @@ class MattisCore(commands.Cog):
         await ctx.send(embed=ok_embed("Monitoring seeded", f"Created `{created}` monitor(s)."))
 
     @monitor.command(name="add")
+
+
     async def monitor_add(self, ctx, *, text: str):
         if not await require_admin(ctx):
             return
@@ -3084,11 +5058,19 @@ class MattisCore(commands.Cog):
         parts = [x.strip() for x in text.split("|")]
         name = parts[0] if len(parts) > 0 else "Unnamed monitor"
         target = parts[1] if len(parts) > 1 else ""
-        critical_text = parts[2].lower() if len(parts) > 2 else "no"
-        critical = critical_text in ["yes", "true", "critical", "high", "1"]
+        critical_text = " ".join(parts[2:3]).lower() if len(parts) > 2 else "no"
+        expected_status = 200
+
+        if len(parts) > 3:
+            try:
+                expected_status = int(parts[3])
+            except Exception:
+                expected_status = 200
+
+        critical = any(x in critical_text.split() for x in ["yes", "true", "critical", "high", "1"])
 
         if not target:
-            await ctx.send(embed=error_embed("Monitor target missing", "Use `name | /endpoint-or-url | critical yes/no`."))
+            await ctx.send(embed=error_embed("Monitor target missing", "Use `name | /endpoint-or-url | critical yes/no | expected_status`."))
             return
 
         state = await self.b16_get_monitor_state(ctx.guild)
@@ -3097,8 +5079,8 @@ class MattisCore(commands.Cog):
         state.setdefault("checks", {})[monitor_id] = {
             "id": monitor_id,
             "name": self.b15_safe(name, 200) if hasattr(self, "b15_safe") else str(name)[:200],
-            "target": target,
-            "expected_status": 200,
+            "target": target.rstrip("/") if target.startswith("http") and len(target) > 8 else target,
+            "expected_status": expected_status,
             "critical": critical,
             "silenced": False,
             "created_at": self.b16_now_iso(),
@@ -3106,7 +5088,7 @@ class MattisCore(commands.Cog):
         }
 
         await self.b16_set_monitor_state(ctx.guild, state)
-        await ctx.send(embed=ok_embed("Monitor added", f"`{monitor_id}` — {name}"))
+        await ctx.send(embed=ok_embed("Monitor added", f"`{monitor_id}` — {name}\nCritical: `{critical}`\nExpected HTTP: `{expected_status}`"))
 
     @monitor.command(name="list")
     async def monitor_list(self, ctx):
