@@ -2521,6 +2521,1981 @@ class MattisCore(commands.Cog):
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
 
+
+    # ============================================================
+    # B32-B44 shared helpers
+    # ============================================================
+
+    def b32_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b32_safe(self, value, limit=1200):
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    async def b32_get_state(self, guild, key, defaults=None):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        state = lifecycle.get(key) or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        for k, v in (defaults or {}).items():
+            state.setdefault(k, v)
+
+        return state
+
+    async def b32_set_state(self, guild, key, state):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle[key] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b32_new_id(self, state, prefix):
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"{prefix}-{state['counter']:04d}"
+
+    def b32_dedupe(self, items):
+        out = []
+        seen = set()
+
+        for item in items or []:
+            key = str(item)
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+
+        return out
+
+    # ============================================================
+    # B32 — Quality / Regression Centre
+    # ============================================================
+
+    @mcore.group(name="quality", invoke_without_command=True)
+    async def quality(self, ctx):
+        """Quality and regression centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Quality / Regression Centre**",
+            "",
+            "`!mcore quality report` — quality report across production systems",
+            "`!mcore quality checks` — recommended regression checks",
+            "`!mcore quality defects` — current known defects/polish items",
+            "`!mcore quality record <area> | <result> | <note>` — record QA result",
+            "`!mcore quality history` — QA history",
+            "`!mcore quality export` — export QA report",
+        ]
+
+        await self.send_paginated(ctx, "Quality Centre", lines)
+
+    async def b32_quality_state(self, guild):
+        return await self.b32_get_state(guild, "quality_regression_centre", {"counter": 0, "records": {}})
+
+    async def b32_quality_data(self, guild):
+        data = {}
+
+        if hasattr(self, "b9_build_ops_snapshot"):
+            data["ops"] = await self.b9_build_ops_snapshot(guild)
+
+        if hasattr(self, "b31_board_data"):
+            data["board"] = await self.b31_board_data(guild)
+
+        if hasattr(self, "b11_check_contracts"):
+            data["contracts"] = await self.b11_check_contracts(guild)
+
+        if hasattr(self, "b16_get_monitor_state"):
+            data["monitors"] = await self.b16_get_monitor_state(guild)
+
+        state = await self.b32_quality_state(guild)
+        data["quality_state"] = state
+
+        return data
+
+    def b32_quality_lines(self, data):
+        ops = data.get("ops") or {}
+        readiness = ops.get("prod_readiness") or {}
+        incidents = ops.get("incidents") or {}
+        alerts = ops.get("alerts") or {}
+        contracts = data.get("contracts") or []
+        contract_summary = self.b11_contract_summary(contracts) if hasattr(self, "b11_contract_summary") else {"ok": 0, "total": 0, "required_failed": 0, "optional_missing": 0}
+        monitors = (data.get("monitors") or {}).get("checks") or {}
+        records = (data.get("quality_state") or {}).get("records") or {}
+
+        failed_monitors = 0
+        critical_failed = 0
+
+        for _, mon in monitors.items():
+            result = mon.get("last_result") or {}
+            if result and not result.get("ok") and not mon.get("silenced"):
+                failed_monitors += 1
+                if mon.get("critical"):
+                    critical_failed += 1
+
+        lines = [
+            "**Quality / Regression Report**",
+            "",
+            f"Production readiness: `{readiness.get('label', 'Unknown')}` `{readiness.get('score', 'Unknown')}/100`",
+            f"Active incidents: `{incidents.get('open', 0)}`",
+            f"Open alerts: `{alerts.get('open', 0)}`",
+            f"API contracts OK: `{contract_summary.get('ok')}/{contract_summary.get('total')}`",
+            f"Required contract failures: `{contract_summary.get('required_failed')}`",
+            f"Optional contract drift: `{contract_summary.get('optional_missing')}`",
+            f"Failed monitors: `{failed_monitors}`",
+            f"Critical failed monitors: `{critical_failed}`",
+            f"QA records: `{len(records)}`",
+            "",
+            "**Quality result:**",
+        ]
+
+        if readiness.get("blockers") or contract_summary.get("required_failed") or critical_failed:
+            lines.append("🚫 Regression gate needs review.")
+        else:
+            lines.append("✅ No hard regression blocker detected from current bot checks.")
+
+        return lines
+
+    @quality.command(name="report")
+    async def quality_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b32_quality_data(ctx.guild)
+        await self.send_paginated(ctx, "Quality Report", self.b32_quality_lines(data))
+
+    @quality.command(name="checks")
+    async def quality_checks(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Recommended regression checks**",
+            "",
+            "1. `!mcore prod readiness`",
+            "2. `!mcore contract check`",
+            "3. `!mcore monitor run all`",
+            "4. `!mcore backup readiness`",
+            "5. `!mcore release preflight <release>`",
+            "6. `!mcore ops dashboard`",
+            "7. `!mcore board report`",
+            "8. Confirm no secrets are exposed in exports/screenshots.",
+        ]
+
+        await self.send_paginated(ctx, "Regression Checks", lines)
+
+    @quality.command(name="defects")
+    async def quality_defects(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Known polish / follow-up items**",
+            "",
+            "- Optional API routes `/bot/incidents` and `/bot/backups/status` can be implemented later.",
+            "- Some env keys still need manual verification in `!mcore configops report`.",
+            "- Discord/Roblox webhook records should be verified once those flows are tested.",
+            "- High-risk audit feed still contains historical/expected setup activity; reduce noise later with API-side filtering.",
+        ]
+
+        await self.send_paginated(ctx, "Known Quality Items", lines)
+
+    @quality.command(name="record")
+    async def quality_record(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        area = parts[0] if len(parts) > 0 else "General"
+        result = parts[1] if len(parts) > 1 else "noted"
+        note = parts[2] if len(parts) > 2 else ""
+
+        state = await self.b32_quality_state(ctx.guild)
+        rec_id = self.b32_new_id(state, "QA")
+
+        state.setdefault("records", {})[rec_id] = {
+            "id": rec_id,
+            "area": self.b32_safe(area, 120),
+            "result": self.b32_safe(result, 120),
+            "note": self.b32_safe(note, 1000),
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b32_set_state(ctx.guild, "quality_regression_centre", state)
+        await ctx.send(embed=ok_embed("QA record saved", f"`{rec_id}` — {area}: {result}"))
+
+    @quality.command(name="history")
+    async def quality_history(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b32_quality_state(ctx.guild)
+        records = state.get("records") or {}
+
+        if not records:
+            await ctx.send(embed=info_embed("QA History", "No QA records yet."))
+            return
+
+        lines = []
+
+        for rec_id, rec in sorted(records.items(), reverse=True):
+            lines.append(f"`{rec_id}` — `{rec.get('area')}` `{rec.get('result')}` — {rec.get('note')}")
+
+        await self.send_paginated(ctx, "QA History", lines)
+
+    @quality.command(name="export")
+    async def quality_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b32_quality_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b32_quality_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Quality report exported", "Exported quality/regression report."),
+            file=discord.File(fp, filename="mattis-quality-regression-report.txt")
+        )
+
+    # ============================================================
+    # B33 — Production Health Matrix
+    # ============================================================
+
+    @mcore.group(name="healthmatrix", invoke_without_command=True)
+    async def healthmatrix(self, ctx):
+        """Production health matrix."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Production Health Matrix**",
+            "",
+            "`!mcore healthmatrix report` — full matrix",
+            "`!mcore healthmatrix score` — compact scores",
+            "`!mcore healthmatrix red` — red/amber items",
+            "`!mcore healthmatrix export` — export matrix",
+        ]
+
+        await self.send_paginated(ctx, "Health Matrix", lines)
+
+    async def b33_matrix_data(self, guild):
+        data = {}
+
+        if hasattr(self, "b5_build_readiness"):
+            data["prod"] = await self.b5_build_readiness(guild, include_optional=False)
+
+        if hasattr(self, "b12_backup_readiness"):
+            data["backup"] = await self.b12_backup_readiness(guild)
+
+        if hasattr(self, "b11_check_contracts"):
+            data["contracts"] = await self.b11_check_contracts(guild)
+
+        if hasattr(self, "b16_get_monitor_state"):
+            data["monitors"] = await self.b16_get_monitor_state(guild)
+
+        if hasattr(self, "b28_get_webhook_state"):
+            data["webhooks"] = await self.b28_get_webhook_state(guild)
+
+        if hasattr(self, "b29_get_oauth_state"):
+            data["oauth"] = await self.b29_get_oauth_state(guild)
+
+        if hasattr(self, "b25_get_config_state"):
+            data["config"] = await self.b25_get_config_state(guild)
+
+        return data
+
+    def b33_score_line(self, name, status, score, detail):
+        emoji = "✅" if score >= 80 else "🟡" if score >= 60 else "🔴"
+        return f"{emoji} **{name}** — `{status}` — `{score}/100` — {detail}"
+
+    def b33_matrix_lines(self, data):
+        prod = (data.get("prod") or {}).get("readiness") or {}
+        backup = (data.get("backup") or {}).get("readiness") or {}
+        contracts = data.get("contracts") or []
+        contract_summary = self.b11_contract_summary(contracts) if hasattr(self, "b11_contract_summary") else {"ok": 0, "total": 0, "required_failed": 0, "optional_missing": 0}
+        monitors = (data.get("monitors") or {}).get("checks") or {}
+        webhooks = (data.get("webhooks") or {}).get("records") or {}
+        oauth = (data.get("oauth") or {}).get("providers") or {}
+        config = data.get("config") or {}
+
+        failed_monitors = 0
+        critical_failed = 0
+
+        for _, mon in monitors.items():
+            result = mon.get("last_result") or {}
+            if result and not result.get("ok") and not mon.get("silenced"):
+                failed_monitors += 1
+                if mon.get("critical"):
+                    critical_failed += 1
+
+        monitor_score = max(0, 100 - (critical_failed * 30) - (failed_monitors * 10))
+
+        required = config.get("required") or []
+        verified = config.get("verified") or {}
+        config_score = int((len(verified) / len(required) * 100)) if required else 100
+
+        webhook_total = len(webhooks)
+        webhook_verified = sum(1 for _, x in webhooks.items() if x.get("status") == "verified")
+        webhook_score = int((webhook_verified / webhook_total * 100)) if webhook_total else 100
+
+        oauth_total = len(oauth)
+        oauth_verified = sum(1 for _, x in oauth.items() if x.get("status") == "verified")
+        oauth_score = int((oauth_verified / oauth_total * 100)) if oauth_total else 100
+
+        contract_score = 100 if contract_summary.get("required_failed", 0) == 0 else 40
+
+        lines = [
+            "**Production Health Matrix**",
+            "",
+            self.b33_score_line("Production", prod.get("label", "Unknown"), int(prod.get("score", 0) or 0), "prod readiness gate"),
+            self.b33_score_line("Backup", backup.get("label", "Unknown"), int(backup.get("score", 0) or 0), "backup/restore evidence"),
+            self.b33_score_line("API Contracts", "OK" if contract_summary.get("required_failed", 0) == 0 else "Required failure", contract_score, f"{contract_summary.get('ok')}/{contract_summary.get('total')} contracts OK"),
+            self.b33_score_line("Monitoring", "OK" if failed_monitors == 0 else "Failures", monitor_score, f"{failed_monitors} failed monitor(s), {critical_failed} critical"),
+            self.b33_score_line("Webhooks", f"{webhook_verified}/{webhook_total} verified", webhook_score, "Stripe/Roblox/Discord webhook verification"),
+            self.b33_score_line("OAuth", f"{oauth_verified}/{oauth_total} verified", oauth_score, "Discord/Roblox OAuth verification"),
+            self.b33_score_line("Config", f"{len(verified)}/{len(required)} verified", config_score, "required env/config verification"),
+        ]
+
+        return lines
+
+    @healthmatrix.command(name="report")
+    async def healthmatrix_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b33_matrix_data(ctx.guild)
+        await self.send_paginated(ctx, "Production Health Matrix", self.b33_matrix_lines(data))
+
+    @healthmatrix.command(name="score")
+    async def healthmatrix_score(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b33_matrix_data(ctx.guild)
+        lines = self.b33_matrix_lines(data)
+        await self.send_paginated(ctx, "Health Scores", lines)
+
+    @healthmatrix.command(name="red")
+    async def healthmatrix_red(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b33_matrix_data(ctx.guild)
+        lines = [x for x in self.b33_matrix_lines(data) if x.startswith("🔴") or x.startswith("🟡")]
+
+        await self.send_paginated(ctx, "Red/Amber Health Items", lines or ["✅ No red/amber health items detected."])
+
+    @healthmatrix.command(name="export")
+    async def healthmatrix_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b33_matrix_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b33_matrix_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Health matrix exported", "Exported production health matrix."),
+            file=discord.File(fp, filename="mattis-production-health-matrix.txt")
+        )
+
+    # ============================================================
+    # B34 — Support Operations Centre
+    # ============================================================
+
+    @mcore.group(name="supportops", invoke_without_command=True)
+    async def supportops(self, ctx):
+        """Support operations centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Support Operations Centre**",
+            "",
+            "`!mcore supportops summary` — support API summary",
+            "`!mcore supportops critical` — critical support feed",
+            "`!mcore supportops unassigned` — unassigned support feed",
+            "`!mcore supportops runbook` — support runbook",
+            "`!mcore supportops export` — export support report",
+        ]
+
+        await self.send_paginated(ctx, "Support Ops", lines)
+
+    def b34_payload_count(self, payload):
+        if isinstance(payload, list):
+            return len(payload)
+        if isinstance(payload, dict):
+            for key in ["count", "total", "items", "tickets", "records", "data"]:
+                value = payload.get(key)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, list):
+                    return len(value)
+        return 0
+
+    async def b34_support_data(self, guild):
+        endpoints = ["/bot/support/critical", "/bot/support/unassigned"]
+        results = []
+
+        if hasattr(self, "b5_http_get"):
+            for endpoint in endpoints:
+                results.append(await self.b5_http_get(guild, endpoint, timeout_seconds=10))
+
+        return results
+
+    def b34_support_lines(self, results):
+        lines = ["**Support Operations Summary**", ""]
+
+        for result in results:
+            count = self.b34_payload_count(result.get("payload"))
+            emoji = "✅" if result.get("ok") else "❌"
+            lines.append(f"{emoji} `{result.get('endpoint')}` — HTTP `{result.get('status')}` — count `{count}` — `{result.get('elapsed_ms')}ms`")
+
+        lines.extend([
+            "",
+            "**Support runbook:**",
+            "1. Review critical tickets first.",
+            "2. Assign unassigned tickets.",
+            "3. Escalate billing/security/customer-impact items.",
+            "4. Link incidents where support volume indicates operational impact.",
+        ])
+
+        return lines
+
+    @supportops.command(name="summary")
+    async def supportops_summary(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b34_support_data(ctx.guild)
+        await self.send_paginated(ctx, "Support Summary", self.b34_support_lines(results))
+
+    @supportops.command(name="critical")
+    async def supportops_critical(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        result = await self.b5_http_get(ctx.guild, "/bot/support/critical", timeout_seconds=10)
+        lines = self.b5_check_lines([result]) if hasattr(self, "b5_check_lines") else [str(result)]
+        await self.send_paginated(ctx, "Critical Support Feed", lines)
+
+    @supportops.command(name="unassigned")
+    async def supportops_unassigned(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        result = await self.b5_http_get(ctx.guild, "/bot/support/unassigned", timeout_seconds=10)
+        lines = self.b5_check_lines([result]) if hasattr(self, "b5_check_lines") else [str(result)]
+        await self.send_paginated(ctx, "Unassigned Support Feed", lines)
+
+    @supportops.command(name="runbook")
+    async def supportops_runbook(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Support Ops Runbook**",
+            "",
+            "1. Check `!mcore supportops critical`.",
+            "2. Check `!mcore supportops unassigned`.",
+            "3. If customer impact is confirmed, record `!mcore impact add ...`.",
+            "4. If operational impact is suspected, open/link an incident.",
+            "5. Draft comms if customer-facing.",
+        ]
+
+        await self.send_paginated(ctx, "Support Runbook", lines)
+
+    @supportops.command(name="export")
+    async def supportops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        results = await self.b34_support_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b34_support_lines(results)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Support report exported", "Exported support operations report."),
+            file=discord.File(fp, filename="mattis-support-ops-report.txt")
+        )
+
+    # ============================================================
+    # B35 — Billing Operations Centre
+    # ============================================================
+
+    @mcore.group(name="billingops", invoke_without_command=True)
+    async def billingops(self, ctx):
+        """Billing operations centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Billing Operations Centre**",
+            "",
+            "`!mcore billingops summary` — billing API summary",
+            "`!mcore billingops failed` — failed billing feed",
+            "`!mcore billingops pastdue` — past-due billing feed",
+            "`!mcore billingops stripe` — Stripe operational view",
+            "`!mcore billingops dunning` — dunning/customer access runbook",
+            "`!mcore billingops export` — export billing report",
+        ]
+
+        await self.send_paginated(ctx, "Billing Ops", lines)
+
+    async def b35_billing_data(self, guild):
+        endpoints = ["/bot/billing/failed", "/bot/billing/pastdue"]
+        results = []
+
+        if hasattr(self, "b5_http_get"):
+            for endpoint in endpoints:
+                results.append(await self.b5_http_get(guild, endpoint, timeout_seconds=10))
+
+        webhook_state = await self.b28_get_webhook_state(guild) if hasattr(self, "b28_get_webhook_state") else {"records": {}}
+        secret_state = await self.b24_get_secret_state(guild) if hasattr(self, "b24_get_secret_state") else {"records": {}}
+
+        return {
+            "results": results,
+            "webhooks": webhook_state.get("records") or {},
+            "secrets": secret_state.get("records") or {},
+        }
+
+    def b35_billing_lines(self, data):
+        lines = ["**Billing Operations Summary**", ""]
+
+        for result in data.get("results") or []:
+            count = self.b34_payload_count(result.get("payload")) if hasattr(self, "b34_payload_count") else 0
+            emoji = "✅" if result.get("ok") else "❌"
+            lines.append(f"{emoji} `{result.get('endpoint')}` — HTTP `{result.get('status')}` — count `{count}` — `{result.get('elapsed_ms')}ms`")
+
+        stripe = (data.get("webhooks") or {}).get("stripe_webhook") or {}
+
+        lines.extend([
+            "",
+            "**Stripe webhook:**",
+            f"Status: `{stripe.get('status', 'unknown')}`",
+            f"Verified at: `{stripe.get('verified_at', 'not verified')}`",
+            "",
+            "**Secret ledger records mentioning Stripe:**",
+        ])
+
+        found = False
+        for rid, item in (data.get("secrets") or {}).items():
+            hay = " ".join([str(item.get("name", "")), str(item.get("system", "")), str(item.get("reason", ""))]).lower()
+            if "stripe" in hay:
+                found = True
+                lines.append(f"- `{rid}` `{item.get('status')}` — {item.get('name')} — {item.get('reason')}")
+
+        if not found:
+            lines.append("- None")
+
+        return lines
+
+    @billingops.command(name="summary")
+    async def billingops_summary(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b35_billing_data(ctx.guild)
+        await self.send_paginated(ctx, "Billing Summary", self.b35_billing_lines(data))
+
+    @billingops.command(name="failed")
+    async def billingops_failed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        result = await self.b5_http_get(ctx.guild, "/bot/billing/failed", timeout_seconds=10)
+        lines = self.b5_check_lines([result]) if hasattr(self, "b5_check_lines") else [str(result)]
+        await self.send_paginated(ctx, "Failed Billing Feed", lines)
+
+    @billingops.command(name="pastdue")
+    async def billingops_pastdue(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        result = await self.b5_http_get(ctx.guild, "/bot/billing/pastdue", timeout_seconds=10)
+        lines = self.b5_check_lines([result]) if hasattr(self, "b5_check_lines") else [str(result)]
+        await self.send_paginated(ctx, "Past-Due Billing Feed", lines)
+
+    @billingops.command(name="stripe")
+    async def billingops_stripe(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b35_billing_data(ctx.guild)
+        await self.send_paginated(ctx, "Stripe Operations", self.b35_billing_lines(data))
+
+    @billingops.command(name="dunning")
+    async def billingops_dunning(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Dunning / customer access runbook**",
+            "",
+            "1. Confirm Stripe webhook delivery is healthy.",
+            "2. Check failed and past-due feeds.",
+            "3. Confirm customer entitlement sync behaviour.",
+            "4. Do not remove access manually unless policy allows.",
+            "5. Create support/customer impact record if needed.",
+            "6. Link evidence to release/incident if billing issue relates to deployment.",
+        ]
+
+        await self.send_paginated(ctx, "Billing Dunning Runbook", lines)
+
+    @billingops.command(name="export")
+    async def billingops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b35_billing_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b35_billing_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Billing report exported", "Exported billing operations report."),
+            file=discord.File(fp, filename="mattis-billing-ops-report.txt")
+        )
+
+    # ============================================================
+    # B36 — Access Review / RBAC Governance
+    # ============================================================
+
+    @mcore.group(name="accessreview", invoke_without_command=True)
+    async def accessreview(self, ctx):
+        """Access review and RBAC governance."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Access Review / RBAC Governance**",
+            "",
+            "`!mcore accessreview start <title>` — start access review",
+            "`!mcore accessreview item <review> <role/capability> | <finding>` — add item",
+            "`!mcore accessreview signoff <review> <area> <note>` — sign off review",
+            "`!mcore accessreview list` — list reviews",
+            "`!mcore accessreview show <review>` — show review",
+            "`!mcore accessreview checklist` — access checklist",
+            "`!mcore accessreview export <review>` — export review",
+        ]
+
+        await self.send_paginated(ctx, "Access Review", lines)
+
+    async def b36_state(self, guild):
+        return await self.b32_get_state(guild, "access_review_centre", {"counter": 0, "reviews": {}})
+
+    async def b36_find(self, guild, query):
+        state = await self.b36_state(guild)
+        reviews = state.get("reviews") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in reviews:
+            key = q.upper()
+            return key, reviews[key], state
+
+        for key, item in reviews.items():
+            hay = " ".join([key, str(item.get("title", ""))]).lower()
+            if q in hay:
+                return key, item, state
+
+        return None, None, state
+
+    @accessreview.command(name="start")
+    async def accessreview_start(self, ctx, *, title: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b36_state(ctx.guild)
+        review_id = self.b32_new_id(state, "AR")
+
+        state.setdefault("reviews", {})[review_id] = {
+            "id": review_id,
+            "title": self.b32_safe(title, 240),
+            "status": "open",
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+            "items": [],
+            "signoffs": {},
+        }
+
+        await self.b32_set_state(ctx.guild, "access_review_centre", state)
+        await ctx.send(embed=ok_embed("Access review started", f"`{review_id}` — {title}"))
+
+    @accessreview.command(name="item")
+    async def accessreview_item(self, ctx, review_query: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        review_id, review, state = await self.b36_find(ctx.guild, review_query)
+
+        if not review:
+            await ctx.send(embed=info_embed("Access review not found", f"No review matched `{review_query}`."))
+            return
+
+        if "|" in text:
+            area, finding = [x.strip() for x in text.split("|", 1)]
+        else:
+            area = "General"
+            finding = text
+
+        review.setdefault("items", []).append({
+            "area": self.b32_safe(area, 120),
+            "finding": self.b32_safe(finding, 1000),
+            "at": self.b32_now_iso(),
+            "by": str(ctx.author),
+        })
+
+        state["reviews"][review_id] = review
+        await self.b32_set_state(ctx.guild, "access_review_centre", state)
+        await ctx.send(embed=ok_embed("Access review item added", f"`{review_id}` updated."))
+
+    @accessreview.command(name="signoff")
+    async def accessreview_signoff(self, ctx, review_query: str, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        review_id, review, state = await self.b36_find(ctx.guild, review_query)
+
+        if not review:
+            await ctx.send(embed=info_embed("Access review not found", f"No review matched `{review_query}`."))
+            return
+
+        review.setdefault("signoffs", {})[area.title()] = {
+            "at": self.b32_now_iso(),
+            "by": str(ctx.author),
+            "note": self.b32_safe(note, 1000),
+        }
+
+        state["reviews"][review_id] = review
+        await self.b32_set_state(ctx.guild, "access_review_centre", state)
+        await ctx.send(embed=ok_embed("Access review signoff added", f"`{review_id}` signed off for `{area.title()}`."))
+
+    @accessreview.command(name="list")
+    async def accessreview_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b36_state(ctx.guild)
+        reviews = state.get("reviews") or {}
+
+        if not reviews:
+            await ctx.send(embed=info_embed("Access Reviews", "No access reviews yet."))
+            return
+
+        lines = [f"`{rid}` — `{item.get('status')}` — {item.get('title')}" for rid, item in sorted(reviews.items(), reverse=True)]
+        await self.send_paginated(ctx, "Access Reviews", lines)
+
+    def b36_review_lines(self, review_id, review):
+        lines = [
+            f"**{review_id} — {review.get('title')}**",
+            f"Status: `{review.get('status')}`",
+            f"Created: `{review.get('created_at')}` by `{review.get('created_by')}`",
+            "",
+            "**Items:**",
+        ]
+
+        items = review.get("items") or []
+        if items:
+            for item in items:
+                lines.append(f"- `{item.get('area')}` — {item.get('finding')} — by `{item.get('by')}`")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Signoffs:**"])
+        signoffs = review.get("signoffs") or {}
+        if signoffs:
+            for area, item in signoffs.items():
+                lines.append(f"- `{area}` by `{item.get('by')}` at `{item.get('at')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    @accessreview.command(name="show")
+    async def accessreview_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        review_id, review, _ = await self.b36_find(ctx.guild, query)
+
+        if not review:
+            await ctx.send(embed=info_embed("Access review not found", f"No review matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Access Review", self.b36_review_lines(review_id, review))
+
+    @accessreview.command(name="checklist")
+    async def accessreview_checklist(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Access review checklist**",
+            "",
+            "☐ Founder/Admin roles are limited.",
+            "☐ Billing roles only access billing commands.",
+            "☐ Security roles can access audit/security/incident tooling.",
+            "☐ Support roles can access support tooling.",
+            "☐ No customer role has staff/admin bot capabilities.",
+            "☐ Removed staff accounts are reviewed.",
+            "☐ `!mcore capabilities matrix` is reviewed.",
+        ]
+
+        await self.send_paginated(ctx, "Access Review Checklist", lines)
+
+    @accessreview.command(name="export")
+    async def accessreview_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        review_id, review, _ = await self.b36_find(ctx.guild, query)
+
+        if not review:
+            await ctx.send(embed=info_embed("Access review not found", f"No review matched `{query}`."))
+            return
+
+        report = "\n".join([x.replace("**", "") for x in self.b36_review_lines(review_id, review)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Access review exported", f"Exported `{review_id}`."),
+            file=discord.File(fp, filename=f"mattis-access-review-{review_id.lower()}.txt")
+        )
+
+    # ============================================================
+    # B37 — Vendor Dependency Register
+    # ============================================================
+
+    @mcore.group(name="vendor", invoke_without_command=True)
+    async def vendor(self, ctx):
+        """Vendor dependency register."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Vendor Dependency Register**",
+            "",
+            "`!mcore vendor seed` — seed standard vendors",
+            "`!mcore vendor list` — list vendors",
+            "`!mcore vendor verify <vendor> <note>` — verify vendor dependency",
+            "`!mcore vendor risk <vendor> <risk>` — add vendor risk",
+            "`!mcore vendor show <vendor>` — show vendor",
+            "`!mcore vendor export` — export vendor report",
+        ]
+
+        await self.send_paginated(ctx, "Vendor Register", lines)
+
+    async def b37_state(self, guild):
+        return await self.b32_get_state(guild, "vendor_dependency_register", {"vendors": {}})
+
+    @vendor.command(name="seed")
+    async def vendor_seed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b37_state(ctx.guild)
+        vendors = state.setdefault("vendors", {})
+
+        defaults = {
+            "Stripe": "Billing, subscriptions and webhooks.",
+            "Roblox": "OAuth, Open Cloud and customer product integrations.",
+            "Discord": "Bot, support operations and OAuth.",
+            "OVH": "VPS hosting.",
+            "Cloudflare": "DNS, proxy and security controls.",
+            "GitHub": "Source control and deployment workflows.",
+        }
+
+        for name, desc in defaults.items():
+            vendors.setdefault(name.lower(), {
+                "name": name,
+                "description": desc,
+                "status": "unverified",
+                "risks": [],
+            })
+
+        state["vendors"] = vendors
+        await self.b32_set_state(ctx.guild, "vendor_dependency_register", state)
+        await ctx.send(embed=ok_embed("Vendors seeded", "Standard vendor dependencies seeded."))
+
+    @vendor.command(name="list")
+    async def vendor_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b37_state(ctx.guild)
+        vendors = state.get("vendors") or {}
+
+        lines = [f"`{item.get('name')}` — `{item.get('status')}` — {item.get('description')}" for _, item in sorted(vendors.items())]
+        await self.send_paginated(ctx, "Vendor Dependencies", lines or ["No vendors yet."])
+
+    async def b37_find_vendor(self, guild, query):
+        state = await self.b37_state(guild)
+        vendors = state.get("vendors") or {}
+        q = str(query or "").lower().strip()
+
+        if q in vendors:
+            return q, vendors[q], state
+
+        for key, item in vendors.items():
+            if q in key or q in str(item.get("name", "")).lower():
+                return key, item, state
+
+        return None, None, state
+
+    @vendor.command(name="verify")
+    async def vendor_verify(self, ctx, vendor_query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        key, item, state = await self.b37_find_vendor(ctx.guild, vendor_query)
+
+        if not item:
+            key = vendor_query.lower()
+            item = {"name": vendor_query, "description": "Custom vendor.", "risks": []}
+
+        item["status"] = "verified"
+        item["verified_at"] = self.b32_now_iso()
+        item["verified_by"] = str(ctx.author)
+        item["note"] = self.b32_safe(note, 1000)
+
+        state.setdefault("vendors", {})[key] = item
+        await self.b32_set_state(ctx.guild, "vendor_dependency_register", state)
+        await ctx.send(embed=ok_embed("Vendor verified", f"`{item.get('name')}` verified."))
+
+    @vendor.command(name="risk")
+    async def vendor_risk(self, ctx, vendor_query: str, *, risk: str):
+        if not await require_admin(ctx):
+            return
+
+        key, item, state = await self.b37_find_vendor(ctx.guild, vendor_query)
+
+        if not item:
+            key = vendor_query.lower()
+            item = {"name": vendor_query, "description": "Custom vendor.", "status": "unverified", "risks": []}
+
+        risks = item.get("risks") or []
+        risks.append(self.b32_safe(risk, 800))
+        item["risks"] = risks[-30]
+
+        state.setdefault("vendors", {})[key] = item
+        await self.b32_set_state(ctx.guild, "vendor_dependency_register", state)
+        await ctx.send(embed=ok_embed("Vendor risk added", f"Risk added to `{item.get('name')}`."))
+
+    @vendor.command(name="show")
+    async def vendor_show(self, ctx, *, vendor_query: str):
+        if not await require_admin(ctx):
+            return
+
+        key, item, _ = await self.b37_find_vendor(ctx.guild, vendor_query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Vendor not found", f"No vendor matched `{vendor_query}`."))
+            return
+
+        lines = [
+            f"**{item.get('name')}**",
+            f"Status: `{item.get('status')}`",
+            f"Description: {item.get('description')}",
+            f"Verified: `{item.get('verified_at', 'not verified')}`",
+            "",
+            "**Risks:**",
+        ]
+
+        risks = item.get("risks") or []
+        if risks:
+            for risk in risks:
+                lines.append(f"- {risk}")
+        else:
+            lines.append("- None")
+
+        await self.send_paginated(ctx, "Vendor Detail", lines)
+
+    @vendor.command(name="export")
+    async def vendor_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b37_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "Vendor Dependency Report", "=" * 40, ""]
+
+        for _, item in sorted((state.get("vendors") or {}).items()):
+            lines.append(f"{item.get('name')} — {item.get('status')} — {item.get('description')}")
+            for risk in item.get("risks") or []:
+                lines.append(f"  Risk: {risk}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+        await ctx.send(embed=ok_embed("Vendor report exported", "Exported vendor dependency report."), file=discord.File(fp, filename="mattis-vendor-dependency-report.txt"))
+
+    # ============================================================
+    # B38 — Maintenance Window Manager
+    # ============================================================
+
+    @mcore.group(name="maintenance", invoke_without_command=True)
+    async def maintenance(self, ctx):
+        """Maintenance window manager."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Maintenance Window Manager**",
+            "",
+            "`!mcore maintenance create <title> | <window> | <impact>` — create window",
+            "`!mcore maintenance list` — list windows",
+            "`!mcore maintenance approve <id> <note>` — approve window",
+            "`!mcore maintenance start <id> <note>` — start maintenance",
+            "`!mcore maintenance complete <id> <note>` — complete maintenance",
+            "`!mcore maintenance cancel <id> <reason>` — cancel maintenance",
+            "`!mcore maintenance comms <id>` — generate comms draft",
+            "`!mcore maintenance export <id>` — export maintenance record",
+        ]
+
+        await self.send_paginated(ctx, "Maintenance Windows", lines)
+
+    async def b38_state(self, guild):
+        return await self.b32_get_state(guild, "maintenance_window_manager", {"counter": 0, "windows": {}})
+
+    async def b38_find(self, guild, query):
+        state = await self.b38_state(guild)
+        windows = state.get("windows") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in windows:
+            key = q.upper()
+            return key, windows[key], state
+
+        for key, item in windows.items():
+            if q in key.lower() or q in str(item.get("title", "")).lower():
+                return key, item, state
+
+        return None, None, state
+
+    def b38_window_lines(self, win_id, item):
+        return [
+            f"**{win_id} — {item.get('title')}**",
+            f"Status: `{item.get('status')}`",
+            f"Window: `{item.get('window')}`",
+            f"Impact: {item.get('impact')}",
+            f"Created: `{item.get('created_at')}` by `{item.get('created_by')}`",
+            f"Approved: `{item.get('approved_at', 'not approved')}`",
+            f"Started: `{item.get('started_at', 'not started')}`",
+            f"Completed: `{item.get('completed_at', 'not completed')}`",
+        ]
+
+    @maintenance.command(name="create")
+    async def maintenance_create(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        title = parts[0] if len(parts) > 0 else "Maintenance"
+        window = parts[1] if len(parts) > 1 else "Window TBC"
+        impact = parts[2] if len(parts) > 2 else "Impact TBC"
+
+        state = await self.b38_state(ctx.guild)
+        win_id = self.b32_new_id(state, "MW")
+
+        state.setdefault("windows", {})[win_id] = {
+            "id": win_id,
+            "title": self.b32_safe(title, 240),
+            "window": self.b32_safe(window, 240),
+            "impact": self.b32_safe(impact, 1000),
+            "status": "planned",
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+            "timeline": [],
+        }
+
+        await self.b32_set_state(ctx.guild, "maintenance_window_manager", state)
+        await ctx.send(embed=ok_embed("Maintenance window created", f"`{win_id}` — {title}"))
+
+    @maintenance.command(name="list")
+    async def maintenance_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b38_state(ctx.guild)
+        windows = state.get("windows") or {}
+
+        lines = [f"`{wid}` — `{item.get('status')}` — {item.get('title')} — {item.get('window')}" for wid, item in sorted(windows.items(), reverse=True)]
+        await self.send_paginated(ctx, "Maintenance Windows", lines or ["No maintenance windows."])
+
+    async def b38_update_status(self, ctx, query, status, note_field, note):
+        win_id, item, state = await self.b38_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Maintenance window not found", f"No window matched `{query}`."))
+            return
+
+        item["status"] = status
+        item[note_field] = self.b32_safe(note, 1000)
+        item[f"{status}_at"] = self.b32_now_iso()
+        item[f"{status}_by"] = str(ctx.author)
+        item.setdefault("timeline", []).append({"at": self.b32_now_iso(), "status": status, "by": str(ctx.author), "note": note})
+        state["windows"][win_id] = item
+
+        await self.b32_set_state(ctx.guild, "maintenance_window_manager", state)
+        await ctx.send(embed=ok_embed("Maintenance updated", f"`{win_id}` is now `{status}`."))
+
+    @maintenance.command(name="approve")
+    async def maintenance_approve(self, ctx, query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+        await self.b38_update_status(ctx, query, "approved", "approval_note", note)
+
+    @maintenance.command(name="start")
+    async def maintenance_start(self, ctx, query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+        await self.b38_update_status(ctx, query, "started", "start_note", note)
+
+    @maintenance.command(name="complete")
+    async def maintenance_complete(self, ctx, query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+        await self.b38_update_status(ctx, query, "completed", "completion_note", note)
+
+    @maintenance.command(name="cancel")
+    async def maintenance_cancel(self, ctx, query: str, *, reason: str):
+        if not await require_admin(ctx):
+            return
+        await self.b38_update_status(ctx, query, "cancelled", "cancel_reason", reason)
+
+    @maintenance.command(name="comms")
+    async def maintenance_comms(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        win_id, item, _ = await self.b38_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Maintenance window not found", f"No window matched `{query}`."))
+            return
+
+        if hasattr(self, "b17_create_draft"):
+            draft_id, draft = await self.b17_create_draft(ctx.guild, {
+                "type": "maintenance",
+                "title": f"Maintenance notice {win_id}",
+                "audience": "customer",
+                "body": f"Maintenance notice: {item.get('title')}\n\nWindow: {item.get('window')}\nExpected impact: {item.get('impact')}\n\nWe will monitor the service during the window.",
+                "created_by": str(ctx.author),
+                "links": {"maintenance": win_id},
+            })
+            await self.send_paginated(ctx, "Maintenance Comms Draft", self.b17_draft_lines(draft_id, draft))
+        else:
+            await self.send_paginated(ctx, "Maintenance Comms", [f"{item.get('title')} — {item.get('window')} — {item.get('impact')}"])
+
+    @maintenance.command(name="export")
+    async def maintenance_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        win_id, item, _ = await self.b38_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Maintenance window not found", f"No window matched `{query}`."))
+            return
+
+        report = "\n".join([x.replace("**", "") for x in self.b38_window_lines(win_id, item)])
+        fp = io.BytesIO(report.encode("utf-8"))
+        await ctx.send(embed=ok_embed("Maintenance record exported", f"Exported `{win_id}`."), file=discord.File(fp, filename=f"mattis-maintenance-{win_id.lower()}.txt"))
+
+    # ============================================================
+    # B39 — Disaster Recovery Drill Centre
+    # ============================================================
+
+    @mcore.group(name="drill", invoke_without_command=True)
+    async def drill(self, ctx):
+        """Disaster recovery drill centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Disaster Recovery Drill Centre**",
+            "",
+            "`!mcore drill start <title>` — start drill",
+            "`!mcore drill step <id> <step/result>` — add step",
+            "`!mcore drill pass <id> <note>` — pass drill",
+            "`!mcore drill fail <id> <reason>` — fail drill",
+            "`!mcore drill list` — list drills",
+            "`!mcore drill show <id>` — show drill",
+            "`!mcore drill export <id>` — export drill",
+        ]
+
+        await self.send_paginated(ctx, "DR Drills", lines)
+
+    async def b39_state(self, guild):
+        return await self.b32_get_state(guild, "disaster_recovery_drills", {"counter": 0, "drills": {}})
+
+    async def b39_find(self, guild, query):
+        state = await self.b39_state(guild)
+        drills = state.get("drills") or {}
+        q = str(query or "").upper()
+        if q in drills:
+            return q, drills[q], state
+        for key, item in drills.items():
+            if str(query).lower() in str(item.get("title", "")).lower():
+                return key, item, state
+        return None, None, state
+
+    @drill.command(name="start")
+    async def drill_start(self, ctx, *, title: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b39_state(ctx.guild)
+        drill_id = self.b32_new_id(state, "DR")
+        state.setdefault("drills", {})[drill_id] = {
+            "id": drill_id,
+            "title": self.b32_safe(title, 240),
+            "status": "running",
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+            "steps": [],
+        }
+        await self.b32_set_state(ctx.guild, "disaster_recovery_drills", state)
+        await ctx.send(embed=ok_embed("DR drill started", f"`{drill_id}` — {title}"))
+
+    @drill.command(name="step")
+    async def drill_step(self, ctx, drill_query: str, *, step: str):
+        if not await require_admin(ctx):
+            return
+
+        drill_id, item, state = await self.b39_find(ctx.guild, drill_query)
+
+        if not item:
+            await ctx.send(embed=info_embed("DR drill not found", f"No drill matched `{drill_query}`."))
+            return
+
+        item.setdefault("steps", []).append({"at": self.b32_now_iso(), "by": str(ctx.author), "step": self.b32_safe(step, 1000)})
+        state["drills"][drill_id] = item
+        await self.b32_set_state(ctx.guild, "disaster_recovery_drills", state)
+        await ctx.send(embed=ok_embed("DR drill step added", f"`{drill_id}` updated."))
+
+    async def b39_complete_drill(self, ctx, query, status, note):
+        drill_id, item, state = await self.b39_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("DR drill not found", f"No drill matched `{query}`."))
+            return
+
+        item["status"] = status
+        item["completed_at"] = self.b32_now_iso()
+        item["completed_by"] = str(ctx.author)
+        item["result_note"] = self.b32_safe(note, 1200)
+        state["drills"][drill_id] = item
+        await self.b32_set_state(ctx.guild, "disaster_recovery_drills", state)
+        await ctx.send(embed=ok_embed("DR drill updated", f"`{drill_id}` marked `{status}`."))
+
+    @drill.command(name="pass")
+    async def drill_pass(self, ctx, drill_query: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+        await self.b39_complete_drill(ctx, drill_query, "passed", note)
+
+    @drill.command(name="fail")
+    async def drill_fail(self, ctx, drill_query: str, *, reason: str):
+        if not await require_admin(ctx):
+            return
+        await self.b39_complete_drill(ctx, drill_query, "failed", reason)
+
+    @drill.command(name="list")
+    async def drill_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b39_state(ctx.guild)
+        drills = state.get("drills") or {}
+        lines = [f"`{did}` — `{item.get('status')}` — {item.get('title')}" for did, item in sorted(drills.items(), reverse=True)]
+        await self.send_paginated(ctx, "DR Drills", lines or ["No DR drills."])
+
+    def b39_lines(self, drill_id, item):
+        lines = [
+            f"**{drill_id} — {item.get('title')}**",
+            f"Status: `{item.get('status')}`",
+            f"Created: `{item.get('created_at')}` by `{item.get('created_by')}`",
+            f"Completed: `{item.get('completed_at', 'not completed')}`",
+            f"Result note: {item.get('result_note', 'none')}",
+            "",
+            "**Steps:**",
+        ]
+        for step in item.get("steps") or []:
+            lines.append(f"- `{step.get('at')}` by `{step.get('by')}` — {step.get('step')}")
+        if not item.get("steps"):
+            lines.append("- None")
+        return lines
+
+    @drill.command(name="show")
+    async def drill_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        drill_id, item, _ = await self.b39_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("DR drill not found", f"No drill matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "DR Drill", self.b39_lines(drill_id, item))
+
+    @drill.command(name="export")
+    async def drill_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        drill_id, item, _ = await self.b39_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("DR drill not found", f"No drill matched `{query}`."))
+            return
+
+        report = "\n".join([x.replace("**", "") for x in self.b39_lines(drill_id, item)])
+        fp = io.BytesIO(report.encode("utf-8"))
+        await ctx.send(embed=ok_embed("DR drill exported", f"Exported `{drill_id}`."), file=discord.File(fp, filename=f"mattis-dr-drill-{drill_id.lower()}.txt"))
+
+    # ============================================================
+    # B40 — Launch / Go-Live Gate
+    # ============================================================
+
+    @mcore.group(name="launch", invoke_without_command=True)
+    async def launch(self, ctx):
+        """Launch and go-live gate."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Launch / Go-Live Gate**",
+            "",
+            "`!mcore launch readiness` — launch readiness",
+            "`!mcore launch gate` — go/no-go gate",
+            "`!mcore launch approve <area> <note>` — area approval",
+            "`!mcore launch block <reason>` — block launch",
+            "`!mcore launch unblock <reason>` — unblock launch",
+            "`!mcore launch history` — approval/block history",
+            "`!mcore launch export` — export launch report",
+        ]
+
+        await self.send_paginated(ctx, "Launch Gate", lines)
+
+    async def b40_state(self, guild):
+        return await self.b32_get_state(guild, "launch_go_live_gate", {"approvals": {}, "blocked": False, "history": []})
+
+    async def b40_data(self, guild):
+        data = {}
+        if hasattr(self, "b33_matrix_data"):
+            data["matrix"] = await self.b33_matrix_data(guild)
+        if hasattr(self, "b9_build_ops_snapshot"):
+            data["ops"] = await self.b9_build_ops_snapshot(guild)
+        state = await self.b40_state(guild)
+        data["state"] = state
+        return data
+
+    def b40_lines(self, data):
+        state = data.get("state") or {}
+        matrix = data.get("matrix") or {}
+        prod = (matrix.get("prod") or {}).get("readiness") or {}
+        backup = (matrix.get("backup") or {}).get("readiness") or {}
+        contracts = matrix.get("contracts") or []
+        contract_summary = self.b11_contract_summary(contracts) if hasattr(self, "b11_contract_summary") else {"required_failed": 0}
+        approvals = state.get("approvals") or {}
+
+        blockers = []
+
+        if state.get("blocked"):
+            blockers.append(f"Manual launch block: {state.get('block_reason')}")
+
+        if prod.get("blockers"):
+            blockers.extend(prod.get("blockers"))
+
+        if contract_summary.get("required_failed"):
+            blockers.append(f"{contract_summary.get('required_failed')} required API contract(s) failed.")
+
+        if backup.get("blockers"):
+            blockers.extend([f"Backup: {x}" for x in backup.get("blockers")])
+
+        required_approvals = ["Ops", "Security", "Backup", "Billing"]
+        missing = [x for x in required_approvals if x not in approvals]
+
+        if missing:
+            blockers.append("Missing launch approvals: " + ", ".join(missing))
+
+        lines = [
+            "**Launch Readiness**",
+            "",
+            f"Production: `{prod.get('label', 'Unknown')}` `{prod.get('score', 'Unknown')}/100`",
+            f"Backup: `{backup.get('label', 'Unknown')}` `{backup.get('score', 'Unknown')}/100`",
+            f"Required contract failures: `{contract_summary.get('required_failed')}`",
+            f"Manual block: `{'yes' if state.get('blocked') else 'no'}`",
+            "",
+            "**Approvals:**",
+        ]
+
+        if approvals:
+            for area, item in approvals.items():
+                lines.append(f"- ✅ `{area}` by `{item.get('by')}` at `{item.get('at')}` — {item.get('note')}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Blockers:**"])
+
+        if blockers:
+            for item in blockers:
+                lines.append(f"- 🚫 {item}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", f"Gate result: `{'GO' if not blockers else 'NO-GO'}`"])
+
+        return lines
+
+    @launch.command(name="readiness")
+    async def launch_readiness(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b40_data(ctx.guild)
+        await self.send_paginated(ctx, "Launch Readiness", self.b40_lines(data))
+
+    @launch.command(name="gate")
+    async def launch_gate(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b40_data(ctx.guild)
+        await self.send_paginated(ctx, "Go-Live Gate", self.b40_lines(data))
+
+    @launch.command(name="approve")
+    async def launch_approve(self, ctx, area: str, *, note: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b40_state(ctx.guild)
+        area = area.title()
+        state.setdefault("approvals", {})[area] = {"at": self.b32_now_iso(), "by": str(ctx.author), "note": self.b32_safe(note, 1000)}
+        state.setdefault("history", []).append({"at": self.b32_now_iso(), "action": "approve", "area": area, "by": str(ctx.author), "note": note})
+        await self.b32_set_state(ctx.guild, "launch_go_live_gate", state)
+        await ctx.send(embed=ok_embed("Launch approval recorded", f"`{area}` approved."))
+
+    @launch.command(name="block")
+    async def launch_block(self, ctx, *, reason: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b40_state(ctx.guild)
+        state["blocked"] = True
+        state["block_reason"] = self.b32_safe(reason, 1200)
+        state["blocked_by"] = str(ctx.author)
+        state["blocked_at"] = self.b32_now_iso()
+        state.setdefault("history", []).append({"at": self.b32_now_iso(), "action": "block", "by": str(ctx.author), "note": reason})
+        await self.b32_set_state(ctx.guild, "launch_go_live_gate", state)
+        await ctx.send(embed=ok_embed("Launch blocked", reason))
+
+    @launch.command(name="unblock")
+    async def launch_unblock(self, ctx, *, reason: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b40_state(ctx.guild)
+        state["blocked"] = False
+        state["unblocked_by"] = str(ctx.author)
+        state["unblocked_at"] = self.b32_now_iso()
+        state.setdefault("history", []).append({"at": self.b32_now_iso(), "action": "unblock", "by": str(ctx.author), "note": reason})
+        await self.b32_set_state(ctx.guild, "launch_go_live_gate", state)
+        await ctx.send(embed=ok_embed("Launch unblocked", reason))
+
+    @launch.command(name="history")
+    async def launch_history(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b40_state(ctx.guild)
+        history = state.get("history") or {}
+        lines = [f"`{x.get('at')}` — `{x.get('action')}` by `{x.get('by')}` — {x.get('note')}" for x in history[-30:]]
+        await self.send_paginated(ctx, "Launch History", lines or ["No launch history."])
+
+    @launch.command(name="export")
+    async def launch_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b40_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b40_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+        await ctx.send(embed=ok_embed("Launch report exported", "Exported launch/go-live report."), file=discord.File(fp, filename="mattis-launch-go-live-report.txt"))
+
+    # ============================================================
+    # B41 — Knowledge Base / Decision Log
+    # ============================================================
+
+    @mcore.group(name="kb", invoke_without_command=True)
+    async def kb(self, ctx):
+        """Knowledge base and decision log."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Knowledge Base / Decision Log**",
+            "",
+            "`!mcore kb add <category> <title> | <body>` — add KB entry",
+            "`!mcore kb list [category]` — list entries",
+            "`!mcore kb show <id/query>` — show entry",
+            "`!mcore kb decision <title> | <decision>` — add decision",
+            "`!mcore kb export <id/query>` — export entry",
+        ]
+
+        await self.send_paginated(ctx, "Knowledge Base", lines)
+
+    async def b41_state(self, guild):
+        return await self.b32_get_state(guild, "knowledge_base_decisions", {"counter": 0, "entries": {}})
+
+    async def b41_find(self, guild, query):
+        state = await self.b41_state(guild)
+        entries = state.get("entries") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in entries:
+            key = q.upper()
+            return key, entries[key], state
+
+        for key, item in entries.items():
+            hay = " ".join([key, str(item.get("title", "")), str(item.get("category", "")), str(item.get("body", ""))]).lower()
+            if q in hay:
+                return key, item, state
+
+        return None, None, state
+
+    @kb.command(name="add")
+    async def kb_add(self, ctx, category: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            title, body = [x.strip() for x in text.split("|", 1)]
+        else:
+            title = text
+            body = ""
+
+        state = await self.b41_state(ctx.guild)
+        entry_id = self.b32_new_id(state, "KB")
+
+        state.setdefault("entries", {})[entry_id] = {
+            "id": entry_id,
+            "category": category.title(),
+            "title": self.b32_safe(title, 240),
+            "body": self.b32_safe(body, 3000),
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b32_set_state(ctx.guild, "knowledge_base_decisions", state)
+        await ctx.send(embed=ok_embed("KB entry added", f"`{entry_id}` — {title}"))
+
+    @kb.command(name="decision")
+    async def kb_decision(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        await self.kb_add(ctx, "Decision", text=text)
+
+    @kb.command(name="list")
+    async def kb_list(self, ctx, category: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b41_state(ctx.guild)
+        entries = state.get("entries") or {}
+
+        lines = []
+        for entry_id, item in sorted(entries.items(), reverse=True):
+            if category != "all" and str(item.get("category", "")).lower() != category.lower():
+                continue
+            lines.append(f"`{entry_id}` — `{item.get('category')}` — {item.get('title')}")
+
+        await self.send_paginated(ctx, "Knowledge Base Entries", lines or ["No KB entries matched."])
+
+    @kb.command(name="show")
+    async def kb_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        entry_id, item, _ = await self.b41_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("KB entry not found", f"No entry matched `{query}`."))
+            return
+
+        lines = [
+            f"**{entry_id} — {item.get('title')}**",
+            f"Category: `{item.get('category')}`",
+            f"Created: `{item.get('created_at')}` by `{item.get('created_by')}`",
+            "",
+            item.get("body") or "No body.",
+        ]
+
+        await self.send_paginated(ctx, "Knowledge Base Entry", lines)
+
+    @kb.command(name="export")
+    async def kb_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        entry_id, item, _ = await self.b41_find(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("KB entry not found", f"No entry matched `{query}`."))
+            return
+
+        report = "\n".join([f"{entry_id} — {item.get('title')}", f"Category: {item.get('category')}", "", item.get("body") or ""])
+        fp = io.BytesIO(report.encode("utf-8"))
+        await ctx.send(embed=ok_embed("KB entry exported", f"Exported `{entry_id}`."), file=discord.File(fp, filename=f"mattis-kb-{entry_id.lower()}.txt"))
+
+    # ============================================================
+    # B42 — Customer Communications Registry
+    # ============================================================
+
+    @mcore.group(name="customercomms", invoke_without_command=True)
+    async def customercomms(self, ctx):
+        """Customer communications registry."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Customer Communications Registry**",
+            "",
+            "`!mcore customercomms segment <name> | <description>` — add customer segment",
+            "`!mcore customercomms list` — list segments",
+            "`!mcore customercomms plan <segment> <topic> | <message>` — create comms plan",
+            "`!mcore customercomms export` — export customer comms registry",
+        ]
+
+        await self.send_paginated(ctx, "Customer Comms Registry", lines)
+
+    async def b42_state(self, guild):
+        return await self.b32_get_state(guild, "customer_comms_registry", {"counter": 0, "segments": {}, "plans": {}})
+
+    @customercomms.command(name="segment")
+    async def customercomms_segment(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            name, desc = [x.strip() for x in text.split("|", 1)]
+        else:
+            name = text
+            desc = ""
+
+        state = await self.b42_state(ctx.guild)
+        key = name.lower()
+
+        state.setdefault("segments", {})[key] = {
+            "name": self.b32_safe(name, 160),
+            "description": self.b32_safe(desc, 1000),
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b32_set_state(ctx.guild, "customer_comms_registry", state)
+        await ctx.send(embed=ok_embed("Customer segment saved", name))
+
+    @customercomms.command(name="list")
+    async def customercomms_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b42_state(ctx.guild)
+        segments = state.get("segments") or {}
+        plans = state.get("plans") or {}
+
+        lines = ["**Segments:**"]
+        for _, item in sorted(segments.items()):
+            lines.append(f"- `{item.get('name')}` — {item.get('description')}")
+
+        lines.extend(["", "**Comms plans:**"])
+        for plan_id, item in sorted(plans.items(), reverse=True):
+            lines.append(f"- `{plan_id}` — `{item.get('segment')}` — {item.get('topic')}")
+
+        if not segments and not plans:
+            lines.append("No customer comms records yet.")
+
+        await self.send_paginated(ctx, "Customer Comms Registry", lines)
+
+    @customercomms.command(name="plan")
+    async def customercomms_plan(self, ctx, segment: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            topic, message = [x.strip() for x in text.split("|", 1)]
+        else:
+            topic = text
+            message = ""
+
+        state = await self.b42_state(ctx.guild)
+        plan_id = self.b32_new_id(state, "CC")
+
+        state.setdefault("plans", {})[plan_id] = {
+            "id": plan_id,
+            "segment": segment,
+            "topic": self.b32_safe(topic, 240),
+            "message": self.b32_safe(message, 2000),
+            "created_at": self.b32_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b32_set_state(ctx.guild, "customer_comms_registry", state)
+        await ctx.send(embed=ok_embed("Customer comms plan saved", f"`{plan_id}` — {topic}"))
+
+    @customercomms.command(name="export")
+    async def customercomms_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b42_state(ctx.guild)
+        lines = ["Mattis CMS | Systems", "Customer Communications Registry", "=" * 40, "", "Segments", "-" * 40]
+
+        for _, item in sorted((state.get("segments") or {}).items()):
+            lines.append(f"{item.get('name')} — {item.get('description')}")
+
+        lines.extend(["", "Plans", "-" * 40])
+        for plan_id, item in sorted((state.get("plans") or {}).items()):
+            lines.append(f"{plan_id} — {item.get('segment')} — {item.get('topic')} — {item.get('message')}")
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+        await ctx.send(embed=ok_embed("Customer comms registry exported", "Exported customer comms registry."), file=discord.File(fp, filename="mattis-customer-comms-registry.txt"))
+
+    # ============================================================
+    # B43 — Evidence Pack Builder
+    # ============================================================
+
+    @mcore.group(name="pack", invoke_without_command=True)
+    async def pack(self, ctx):
+        """Evidence pack builder."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Evidence Pack Builder**",
+            "",
+            "`!mcore pack release <release>` — release evidence pack",
+            "`!mcore pack incident <incident>` — incident evidence pack",
+            "`!mcore pack launch` — launch evidence pack",
+            "`!mcore pack security` — security evidence pack",
+            "`!mcore pack full` — full production evidence pack",
+        ]
+
+        await self.send_paginated(ctx, "Evidence Pack Builder", lines)
+
+    @pack.command(name="release")
+    async def pack_release(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        if hasattr(self, "b14_pack_release_lines"):
+            lines = await self.b14_pack_release_lines(ctx.guild, query)
+        else:
+            lines = [f"Release pack helper unavailable for `{query}`."]
+        await self.send_paginated(ctx, "Release Evidence Pack", lines)
+
+    @pack.command(name="incident")
+    async def pack_incident(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        if hasattr(self, "b14_pack_incident_lines"):
+            lines = await self.b14_pack_incident_lines(ctx.guild, query)
+        else:
+            lines = [f"Incident pack helper unavailable for `{query}`."]
+        await self.send_paginated(ctx, "Incident Evidence Pack", lines)
+
+    async def b43_launch_pack_lines(self, guild):
+        lines = ["**Launch Evidence Pack**", ""]
+        if hasattr(self, "b40_data"):
+            data = await self.b40_data(guild)
+            lines.extend(self.b40_lines(data))
+        if hasattr(self, "b33_matrix_data"):
+            lines.extend(["", "**Health Matrix:**"])
+            lines.extend(self.b33_matrix_lines(await self.b33_matrix_data(guild)))
+        return lines
+
+    @pack.command(name="launch")
+    async def pack_launch(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = await self.b43_launch_pack_lines(ctx.guild)
+        await self.send_paginated(ctx, "Launch Evidence Pack", lines)
+
+    @pack.command(name="security")
+    async def pack_security(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = ["**Security Evidence Pack**", ""]
+        if hasattr(self, "b23_posture_data"):
+            data = await self.b23_posture_data(ctx.guild)
+            lines.extend(self.b23_report_lines(data))
+        if hasattr(self, "b24_get_secret_state"):
+            state = await self.b24_get_secret_state(ctx.guild)
+            lines.extend(["", "**Secret ledger:**"])
+            for rid, item in sorted((state.get("records") or {}).items()):
+                lines.append(f"- `{rid}` `{item.get('system')}` `{item.get('status')}` — {item.get('name')}")
+        await self.send_paginated(ctx, "Security Evidence Pack", lines)
+
+    @pack.command(name="full")
+    async def pack_full(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        lines = ["Mattis CMS | Systems", "Full Production Evidence Pack", "=" * 40, ""]
+        lines.extend([x.replace("**", "") for x in await self.b43_launch_pack_lines(ctx.guild)])
+
+        if hasattr(self, "b31_board_data"):
+            lines.extend(["", "Executive Board", "-" * 40])
+            data = await self.b31_board_data(ctx.guild)
+            lines.extend([x.replace("**", "") for x in self.b31_board_lines(data)])
+
+        report = "\n".join(lines)
+        fp = io.BytesIO(report.encode("utf-8"))
+        await ctx.send(embed=ok_embed("Full production evidence pack exported", "Exported full evidence pack."), file=discord.File(fp, filename="mattis-full-production-evidence-pack.txt"))
+
+    # ============================================================
+    # B44 — Final Production Command Centre
+    # ============================================================
+
+    @mcore.group(name="finalops", invoke_without_command=True)
+    async def finalops(self, ctx):
+        """Final production command centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Final Production Command Centre**",
+            "",
+            "`!mcore finalops report` — final production report",
+            "`!mcore finalops remaining` — remaining actions",
+            "`!mcore finalops go` — final go/no-go",
+            "`!mcore finalops export` — export final report",
+        ]
+
+        await self.send_paginated(ctx, "Final Production Command", lines)
+
+    async def b44_final_data(self, guild):
+        data = {}
+        if hasattr(self, "b40_data"):
+            data["launch"] = await self.b40_data(guild)
+        if hasattr(self, "b33_matrix_data"):
+            data["matrix"] = await self.b33_matrix_data(guild)
+        if hasattr(self, "b31_board_data"):
+            data["board"] = await self.b31_board_data(guild)
+        if hasattr(self, "b32_quality_data"):
+            data["quality"] = await self.b32_quality_data(guild)
+        return data
+
+    def b44_final_lines(self, data):
+        lines = ["**Final Production Report**", ""]
+
+        if data.get("launch"):
+            lines.extend(self.b40_lines(data["launch"]))
+
+        if data.get("matrix"):
+            lines.extend(["", "**Health Matrix:**"])
+            lines.extend(self.b33_matrix_lines(data["matrix"]))
+
+        if data.get("quality"):
+            lines.extend(["", "**Quality:**"])
+            lines.extend(self.b32_quality_lines(data["quality"]))
+
+        return lines
+
+    @finalops.command(name="report")
+    async def finalops_report(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b44_final_data(ctx.guild)
+        await self.send_paginated(ctx, "Final Production Report", self.b44_final_lines(data))
+
+    @finalops.command(name="remaining")
+    async def finalops_remaining(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b44_final_data(ctx.guild)
+        lines = self.b44_final_lines(data)
+        remaining = [x for x in lines if "☐" in x or "🚫" in x or "🟡" in x or "🔴" in x]
+        await self.send_paginated(ctx, "Remaining Production Actions", remaining or ["✅ No obvious remaining blockers found."])
+
+    @finalops.command(name="go")
+    async def finalops_go(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b44_final_data(ctx.guild)
+        launch_lines = self.b40_lines(data.get("launch") or {}) if data.get("launch") else []
+        gate_line = next((x for x in launch_lines if "Gate result:" in x), "Gate result: `UNKNOWN`")
+
+        await self.send_paginated(ctx, "Final Go / No-Go", launch_lines + ["", f"Final decision helper: {gate_line}"])
+
+    @finalops.command(name="export")
+    async def finalops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b44_final_data(ctx.guild)
+        report = "\n".join([x.replace("**", "") for x in self.b44_final_lines(data)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Final production report exported", "Exported final production command report."),
+            file=discord.File(fp, filename="mattis-final-production-report.txt")
+        )
+
     @mcore.group(name="slo", invoke_without_command=True)
     async def slo(self, ctx):
         """SLO and availability targets."""
@@ -4252,6 +6227,7 @@ class MattisCore(commands.Cog):
 
         return data
 
+
     def b31_board_lines(self, data: dict) -> list[str]:
         ops = data.get("ops") or {}
         readiness = ops.get("prod_readiness") or {}
@@ -4276,8 +6252,17 @@ class MattisCore(commands.Cog):
             "**Executive blockers:**",
         ]
 
-        blockers = readiness.get("blockers") or []
-        blockers += posture.get("blockers") or []
+        def dedupe(items):
+            out = []
+            seen = set()
+            for item in items or []:
+                key = str(item)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(item)
+            return out
+
+        blockers = dedupe((readiness.get("blockers") or []) + (posture.get("blockers") or []))
 
         if blockers:
             for item in blockers[:12]:
@@ -4287,8 +6272,7 @@ class MattisCore(commands.Cog):
 
         lines.extend(["", "**Executive warnings:**"])
 
-        warnings = readiness.get("warnings") or []
-        warnings += posture.get("warnings") or []
+        warnings = dedupe((readiness.get("warnings") or []) + (posture.get("warnings") or []))
 
         if warnings:
             for item in warnings[:15]:
