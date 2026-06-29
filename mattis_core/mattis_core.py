@@ -2210,11 +2210,23 @@ class MattisCore(commands.Cog):
 
         e = self.build_alert_embed(rule_key, rule, status, payload, issue_count, selected_key)
         notify_content = await self.notify_content_for(guild, rule["purpose"], source="alerts")
-        await channel.send(
+        await self.alert_lifecycle_send(
+
+            ctx.guild if 'ctx' in locals() and ctx else channel.guild,
+
+            rule_name if 'rule_name' in locals() else rule if 'rule' in locals() else name if 'name' in locals() else 'alert',
+
+            channel,
+
             content=notify_content or None,
+
             embed=e,
+
             allowed_mentions=self.notify_allowed_mentions(),
-        )
+
+            item=payload if 'payload' in locals() else data if 'data' in locals() else {'count': count if 'count' in locals() else 1},
+
+        ),
 
         rule_state["last_sent"] = now
         rule_state["signature"] = signature
@@ -3404,11 +3416,31 @@ class MattisCore(commands.Cog):
         e.add_field(name="Target", value=channel.mention, inline=True)
         e.add_field(name="Mention content", value=content or "No roles matched.", inline=False)
 
-        await channel.send(
+        await self.alert_lifecycle_send(
+
+
+            ctx.guild if 'ctx' in locals() and ctx else channel.guild,
+
+
+            rule_name if 'rule_name' in locals() else rule if 'rule' in locals() else name if 'name' in locals() else 'alert',
+
+
+            channel,
+
+
             content=content or None,
+
+
             embed=e,
+
+
             allowed_mentions=self.notify_allowed_mentions(),
-        )
+
+
+            item=payload if 'payload' in locals() else data if 'data' in locals() else {'count': count if 'count' in locals() else 1},
+
+
+        ),
 
         await ctx.send(embed=ok_embed("Notify test sent", f"`{purpose_key}` → `{selected_key}` → {channel.mention}"))
 
@@ -6418,6 +6450,491 @@ class MattisCore(commands.Cog):
         color = discord.Color.red() if failures else discord.Color.orange() if warnings else discord.Color.green()
         title = f"Doctor Capability Audit: {'FAIL' if failures else 'WARN' if warnings else 'PASS'}"
         await self.send_paginated(ctx, title, lines, color=color)
+
+
+    def alert_lifecycle_now(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def alert_lifecycle_norm(self, value) -> str:
+        import re
+
+        if value is None:
+            return ""
+
+        value = str(value).lower().strip()
+        value = re.sub(r"[^a-z0-9]+", "_", value)
+        value = re.sub(r"_+", "_", value).strip("_")
+        return value
+
+    def alert_lifecycle_extract_count(self, item) -> int:
+        if isinstance(item, int):
+            return item
+
+        if isinstance(item, float):
+            return int(item)
+
+        if isinstance(item, dict):
+            for key in [
+                "count",
+                "total",
+                "active",
+                "open",
+                "open_count",
+                "critical",
+                "critical_count",
+                "failed",
+                "failed_count",
+                "risk_count",
+                "incident_count",
+            ]:
+                value = item.get(key)
+
+                if isinstance(value, int):
+                    return value
+
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+
+        return 1
+
+    def alert_lifecycle_extract_status(self, item, count: int) -> str:
+        if isinstance(item, dict):
+            for key in ["status", "state", "incident_status", "alert_status", "resolution_status"]:
+                value = item.get(key)
+
+                if value:
+                    status = self.alert_lifecycle_norm(value)
+
+                    if status in ["resolved", "closed", "complete", "completed", "fixed", "cleared"]:
+                        return "resolved"
+
+                    if status in ["reopened", "open_again"]:
+                        return "reopened"
+
+                    if status in ["open", "active", "ongoing", "investigating", "degraded", "critical", "failing"]:
+                        return "ongoing"
+
+        return "ongoing" if count > 0 else "resolved"
+
+    def alert_lifecycle_extract_severity(self, item) -> str:
+        if isinstance(item, dict):
+            for key in ["severity", "level", "priority", "risk", "impact"]:
+                value = item.get(key)
+
+                if value:
+                    return self.alert_lifecycle_norm(value)
+
+        return "unknown"
+
+    def alert_lifecycle_extract_identity(self, rule_name: str, item) -> str:
+        import hashlib
+        import json
+
+        if isinstance(item, dict):
+            for key in [
+                "id",
+                "uuid",
+                "alert_id",
+                "incident_id",
+                "ticket_id",
+                "invoice_id",
+                "session_id",
+                "audit_id",
+                "event_id",
+                "key",
+                "slug",
+                "name",
+                "title",
+                "subject",
+                "message",
+            ]:
+                value = item.get(key)
+
+                if value:
+                    return f"{rule_name}:{self.alert_lifecycle_norm(value)}"
+
+            try:
+                raw = json.dumps(item, sort_keys=True, default=str)
+            except Exception:
+                raw = str(item)
+
+            digest = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+            return f"{rule_name}:hash:{digest}"
+
+        return f"{rule_name}:aggregate"
+
+    def alert_lifecycle_fingerprint(self, rule_name: str, item, count: int, status: str, severity: str) -> str:
+        import hashlib
+        import json
+
+        safe = {
+            "rule": rule_name,
+            "count": count,
+            "status": status,
+            "severity": severity,
+        }
+
+        if isinstance(item, dict):
+            for key in [
+                "id",
+                "uuid",
+                "alert_id",
+                "incident_id",
+                "ticket_id",
+                "invoice_id",
+                "session_id",
+                "audit_id",
+                "status",
+                "state",
+                "severity",
+                "level",
+                "priority",
+                "message",
+                "title",
+                "summary",
+                "name",
+            ]:
+                if key in item:
+                    safe[key] = item.get(key)
+        else:
+            safe["value"] = item
+
+        raw = json.dumps(safe, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    async def alert_lifecycle_get(self) -> dict:
+        cfg = await get_core_config(self.bot)
+
+        try:
+            data = await cfg.alert_lifecycle()
+        except Exception:
+            try:
+                data = await cfg.guild_from_id(0).alert_lifecycle()
+            except Exception:
+                data = {}
+
+        return data or {}
+
+    async def alert_lifecycle_get_guild(self, guild: discord.Guild) -> dict:
+        cfg = await get_core_config(self.bot)
+
+        try:
+            data = await cfg.guild(guild).alert_lifecycle()
+        except Exception:
+            data = {}
+
+        return data or {}
+
+    async def alert_lifecycle_set_guild(self, guild: discord.Guild, data: dict):
+        cfg = await get_core_config(self.bot)
+        await cfg.guild(guild).alert_lifecycle.set(data or {})
+
+    async def alert_lifecycle_settings(self, guild: discord.Guild) -> dict:
+        data = await self.alert_lifecycle_get_guild(guild)
+
+        settings = data.get("_settings") or {}
+        settings.setdefault("enabled", True)
+        settings.setdefault("post_resolved", True)
+        settings.setdefault("post_updates", True)
+        settings.setdefault("edit_original", True)
+        settings.setdefault("stale_resolve_minutes", 0)
+
+        return settings
+
+    async def alert_lifecycle_state(self, guild: discord.Guild) -> dict:
+        data = await self.alert_lifecycle_get_guild(guild)
+        return data.get("state") or {}
+
+    async def alert_lifecycle_save_state(self, guild: discord.Guild, state: dict):
+        data = await self.alert_lifecycle_get_guild(guild)
+        data["state"] = state or {}
+        await self.alert_lifecycle_set_guild(guild, data)
+
+    async def alert_lifecycle_decide(self, guild: discord.Guild, rule_name: str, item) -> tuple[str, dict, dict]:
+        settings = await self.alert_lifecycle_settings(guild)
+
+        if not settings.get("enabled", True):
+            return "post", {}, {}
+
+        state = await self.alert_lifecycle_state(guild)
+
+        rule_name = self.alert_lifecycle_norm(rule_name) or "unknown_rule"
+        count = self.alert_lifecycle_extract_count(item)
+        status = self.alert_lifecycle_extract_status(item, count)
+        severity = self.alert_lifecycle_extract_severity(item)
+        identity = self.alert_lifecycle_extract_identity(rule_name, item)
+        fingerprint = self.alert_lifecycle_fingerprint(rule_name, item, count, status, severity)
+        now = self.alert_lifecycle_now()
+
+        previous = state.get(identity) or {}
+        previous_status = previous.get("status")
+        previous_fingerprint = previous.get("fingerprint")
+        previous_count = previous.get("count")
+        previous_severity = previous.get("severity")
+
+        record = dict(previous)
+        record.update({
+            "id": identity,
+            "rule": rule_name,
+            "status": status,
+            "severity": severity,
+            "count": count,
+            "fingerprint": fingerprint,
+            "last_seen": now,
+        })
+
+        if not record.get("first_seen"):
+            record["first_seen"] = now
+
+        action = "skip"
+
+        if not previous:
+            action = "new" if status != "resolved" else "skip"
+        elif previous_status == "resolved" and status != "resolved":
+            action = "reopened"
+        elif status == "resolved" and previous_status != "resolved":
+            action = "resolved" if settings.get("post_resolved", True) else "skip"
+            record["resolved_at"] = now
+        elif fingerprint != previous_fingerprint or count != previous_count or severity != previous_severity:
+            action = "updated" if settings.get("post_updates", True) else "skip"
+        else:
+            action = "skip"
+
+        if action in ["new", "reopened", "updated", "resolved", "post"]:
+            record["last_posted"] = now
+            record["last_action"] = action
+
+        state[identity] = record
+        await self.alert_lifecycle_save_state(guild, state)
+
+        return action, record, previous
+
+    async def alert_lifecycle_mark_message(self, guild: discord.Guild, record_id: str, channel_id: int | None = None, message_id: int | None = None):
+        state = await self.alert_lifecycle_state(guild)
+
+        if record_id not in state:
+            return
+
+        if channel_id:
+            state[record_id]["channel_id"] = int(channel_id)
+
+        if message_id:
+            state[record_id]["message_id"] = int(message_id)
+
+        await self.alert_lifecycle_save_state(guild, state)
+
+    def alert_lifecycle_status_label(self, action: str, record: dict) -> str:
+        status = record.get("status", "ongoing")
+        severity = record.get("severity", "unknown")
+        count = record.get("count", 1)
+
+        if action == "new":
+            prefix = "🚨 NEW"
+        elif action == "updated":
+            prefix = "🔄 UPDATED"
+        elif action == "resolved":
+            prefix = "✅ RESOLVED"
+        elif action == "reopened":
+            prefix = "♻️ REOPENED"
+        else:
+            prefix = "🚨 ALERT"
+
+        return f"{prefix} · Status: `{status}` · Severity: `{severity}` · Count: `{count}`"
+
+    async def alert_lifecycle_send(self, guild: discord.Guild, rule_name: str, channel, *, content=None, embed=None, allowed_mentions=None, item=None):
+        action, record, previous = await self.alert_lifecycle_decide(guild, rule_name, item if item is not None else {"rule": rule_name})
+
+        if action == "skip":
+            return None
+
+        status_line = self.alert_lifecycle_status_label(action, record)
+
+        final_content = status_line
+
+        if content:
+            final_content = f"{content}\n{status_line}"
+
+        if embed:
+            try:
+                embed.add_field(name="Alert Status", value=status_line, inline=False)
+                embed.add_field(name="Alert ID", value=f"`{record.get('id')}`", inline=False)
+
+                if record.get("first_seen"):
+                    embed.add_field(name="First Seen", value=f"`{record.get('first_seen')}`", inline=True)
+
+                if record.get("last_seen"):
+                    embed.add_field(name="Last Seen", value=f"`{record.get('last_seen')}`", inline=True)
+
+                if record.get("resolved_at"):
+                    embed.add_field(name="Resolved At", value=f"`{record.get('resolved_at')}`", inline=True)
+            except Exception:
+                pass
+
+        # If resolving and original message exists, try editing it first.
+        settings = await self.alert_lifecycle_settings(guild)
+
+        if action in ["updated", "resolved"] and settings.get("edit_original", True):
+            old_channel_id = record.get("channel_id") or previous.get("channel_id")
+            old_message_id = record.get("message_id") or previous.get("message_id")
+
+            if old_channel_id and old_message_id:
+                try:
+                    old_channel = guild.get_channel(int(old_channel_id))
+
+                    if old_channel:
+                        old_message = await old_channel.fetch_message(int(old_message_id))
+                        await old_message.edit(content=final_content, embed=embed, allowed_mentions=allowed_mentions)
+                        await self.alert_lifecycle_mark_message(guild, record.get("id"), old_channel_id, old_message_id)
+                        return old_message
+                except Exception:
+                    pass
+
+        msg = await channel.send(content=final_content, embed=embed, allowed_mentions=allowed_mentions)
+        await self.alert_lifecycle_mark_message(guild, record.get("id"), channel.id, msg.id)
+        return msg
+
+    @alerts.group(name="lifecycle", invoke_without_command=True)
+    async def alerts_lifecycle(self, ctx):
+        """Show alert lifecycle status."""
+        if not await require_admin(ctx):
+            return
+
+        settings = await self.alert_lifecycle_settings(ctx.guild)
+        state = await self.alert_lifecycle_state(ctx.guild)
+
+        ongoing = 0
+        resolved = 0
+
+        for record in state.values():
+            if record.get("status") == "resolved":
+                resolved += 1
+            else:
+                ongoing += 1
+
+        lines = [
+            f"Enabled: `{'yes' if settings.get('enabled', True) else 'no'}`",
+            f"Post updates: `{'yes' if settings.get('post_updates', True) else 'no'}`",
+            f"Post resolved: `{'yes' if settings.get('post_resolved', True) else 'no'}`",
+            f"Edit original message: `{'yes' if settings.get('edit_original', True) else 'no'}`",
+            f"Tracked alerts: `{len(state)}`",
+            f"Ongoing: `{ongoing}`",
+            f"Resolved: `{resolved}`",
+            "",
+            "**Commands:**",
+            "`!mcore alerts lifecycle on`",
+            "`!mcore alerts lifecycle off`",
+            "`!mcore alerts lifecycle state`",
+            "`!mcore alerts lifecycle reset`",
+            "`!mcore alerts lifecycle resolved on/off`",
+            "`!mcore alerts lifecycle updates on/off`",
+            "`!mcore alerts lifecycle edit on/off`",
+        ]
+
+        await self.send_paginated(ctx, "Alert Lifecycle", lines)
+
+    @alerts_lifecycle.command(name="on")
+    async def alerts_lifecycle_on(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.alert_lifecycle_get_guild(ctx.guild)
+        settings = data.get("_settings") or {}
+        settings["enabled"] = True
+        data["_settings"] = settings
+        await self.alert_lifecycle_set_guild(ctx.guild, data)
+
+        await ctx.send(embed=ok_embed("Alert lifecycle enabled", "Duplicate ongoing alerts will now be suppressed."))
+
+    @alerts_lifecycle.command(name="off")
+    async def alerts_lifecycle_off(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.alert_lifecycle_get_guild(ctx.guild)
+        settings = data.get("_settings") or {}
+        settings["enabled"] = False
+        data["_settings"] = settings
+        await self.alert_lifecycle_set_guild(ctx.guild, data)
+
+        await ctx.send(embed=ok_embed("Alert lifecycle disabled", "Alerts will post normally again."))
+
+    @alerts_lifecycle.command(name="resolved")
+    async def alerts_lifecycle_resolved(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = mode.lower() in ["on", "yes", "true", "1", "enable", "enabled"]
+        data = await self.alert_lifecycle_get_guild(ctx.guild)
+        settings = data.get("_settings") or {}
+        settings["post_resolved"] = enabled
+        data["_settings"] = settings
+        await self.alert_lifecycle_set_guild(ctx.guild, data)
+
+        await ctx.send(embed=ok_embed("Resolved alert posting updated", f"Resolved posts are now `{'on' if enabled else 'off'}`."))
+
+    @alerts_lifecycle.command(name="updates")
+    async def alerts_lifecycle_updates(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = mode.lower() in ["on", "yes", "true", "1", "enable", "enabled"]
+        data = await self.alert_lifecycle_get_guild(ctx.guild)
+        settings = data.get("_settings") or {}
+        settings["post_updates"] = enabled
+        data["_settings"] = settings
+        await self.alert_lifecycle_set_guild(ctx.guild, data)
+
+        await ctx.send(embed=ok_embed("Alert update posting updated", f"Update posts are now `{'on' if enabled else 'off'}`."))
+
+    @alerts_lifecycle.command(name="edit")
+    async def alerts_lifecycle_edit(self, ctx, mode: str):
+        if not await require_admin(ctx):
+            return
+
+        enabled = mode.lower() in ["on", "yes", "true", "1", "enable", "enabled"]
+        data = await self.alert_lifecycle_get_guild(ctx.guild)
+        settings = data.get("_settings") or {}
+        settings["edit_original"] = enabled
+        data["_settings"] = settings
+        await self.alert_lifecycle_set_guild(ctx.guild, data)
+
+        await ctx.send(embed=ok_embed("Alert message editing updated", f"Original alert editing is now `{'on' if enabled else 'off'}`."))
+
+    @alerts_lifecycle.command(name="state")
+    async def alerts_lifecycle_state_cmd(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.alert_lifecycle_state(ctx.guild)
+        lines = []
+
+        for key, record in sorted(state.items()):
+            lines.append(
+                f"**{key}**\n"
+                f"Rule: `{record.get('rule')}`\n"
+                f"Status: `{record.get('status')}`\n"
+                f"Severity: `{record.get('severity')}`\n"
+                f"Count: `{record.get('count')}`\n"
+                f"First seen: `{record.get('first_seen')}`\n"
+                f"Last seen: `{record.get('last_seen')}`\n"
+                f"Last posted: `{record.get('last_posted')}`\n"
+                f"Last action: `{record.get('last_action')}`"
+            )
+
+        await self.send_paginated(ctx, "Alert Lifecycle State", lines, empty="No alert lifecycle state saved.")
+
+    @alerts_lifecycle.command(name="reset")
+    async def alerts_lifecycle_reset(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        data = await self.alert_lifecycle_get_guild(ctx.guild)
+        data["state"] = {}
+        await self.alert_lifecycle_set_guild(ctx.guild, data)
+
+        await ctx.send(embed=ok_embed("Alert lifecycle reset", "Tracked alert state has been cleared."))
+
 
     @mcore.command(name="routecheck")
     async def routecheck(self, ctx):

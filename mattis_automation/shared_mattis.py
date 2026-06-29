@@ -30,6 +30,7 @@ async def get_core_config(bot) -> Config:
         route_backups=[],
         alert_settings={},
         alert_state={},
+        alert_lifecycle={},
         log_settings={},
         log_state={},
         notify_settings={},
