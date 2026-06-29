@@ -3353,6 +3353,280 @@ class MattisCore(commands.Cog):
         return path[0] if path else "Management"
 
 
+
+    def b4a_redact_log_value(self, value):
+        import re
+
+        if value is None:
+            return ""
+
+        text = str(value)
+
+        text = re.sub(r"\b(sk_live|sk_test|pk_live|pk_test|xoxb|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_\-]{8,}\b", "<secret>", text)
+        text = re.sub(r"\b[A-Za-z0-9+/]{90,}={0,2}\b", "<secret>", text)
+
+        return text[:300]
+
+    def b4a_log_event_time(self, event: dict) -> str:
+        return str(
+            event.get("createdAt")
+            or event.get("timestamp")
+            or event.get("time")
+            or event.get("at")
+            or "Unknown"
+        )
+
+    def b4a_log_event_actor(self, event: dict) -> str:
+        return self.b4a_redact_log_value(
+            event.get("actorUserId")
+            or event.get("actorId")
+            or event.get("actor")
+            or event.get("userId")
+            or "Unknown"
+        )
+
+    def b4a_log_event_action(self, event: dict) -> str:
+        return self.b4a_redact_log_value(
+            event.get("action")
+            or event.get("type")
+            or event.get("event")
+            or "Unknown"
+        )
+
+    def b4a_log_event_reason(self, event: dict) -> str:
+        return self.b4a_redact_log_value(
+            event.get("reason")
+            or event.get("message")
+            or event.get("description")
+            or "Unknown"
+        )
+
+    def b4a_log_event_risk(self, event: dict) -> str:
+        return self.b4a_redact_log_value(
+            event.get("riskLevel")
+            or event.get("risk")
+            or event.get("severity")
+            or "unknown"
+        ).lower()
+
+    def b4a_classify_log_event(self, event: dict) -> dict:
+        action = self.b4a_log_event_action(event).lower()
+        reason = self.b4a_log_event_reason(event).lower()
+        risk = self.b4a_log_event_risk(event)
+
+        category = "General"
+        severity = risk if risk in ["critical", "high", "medium", "low"] else "low"
+
+        if "secret" in reason or "token" in reason or "key" in reason or "webhook" in reason:
+            category = "Secrets / Tokens"
+            severity = "high"
+
+        elif "billing" in reason or "stripe" in reason or "invoice" in reason:
+            category = "Billing / Stripe"
+            severity = "high" if severity in ["high", "critical"] else "medium"
+
+        elif "roblox" in reason:
+            category = "Roblox Integration"
+            severity = "high" if severity in ["high", "critical"] else "medium"
+
+        elif "permission" in reason or "role" in reason or "access" in reason or "capability" in reason:
+            category = "Access / Permissions"
+            severity = "high"
+
+        elif "route" in reason or "channel" in reason:
+            category = "Routes / Discord Logs"
+            severity = "medium"
+
+        elif "platform.setting.updated" in action or "setting.updated" in action:
+            category = "Platform Settings"
+            severity = "high" if severity in ["high", "critical"] else "medium"
+
+        return {
+            "category": category,
+            "severity": severity,
+            "action": self.b4a_log_event_action(event),
+            "reason": self.b4a_log_event_reason(event),
+            "actor": self.b4a_log_event_actor(event),
+            "risk": self.b4a_log_event_risk(event),
+            "createdAt": self.b4a_log_event_time(event),
+            "id": self.b4a_redact_log_value(event.get("id") or ""),
+        }
+
+    async def b4a_get_api_config(self, guild):
+        api_url = "https://api.mattisproductions.com"
+        api_token = None
+
+        if hasattr(self, "doctor_get_api_config_value"):
+            try:
+                found_url = await self.doctor_get_api_config_value(guild, [
+                    "api_url",
+                    "api_base_url",
+                    "mattis_api_url",
+                    "backend_url",
+                ])
+
+                found_token = await self.doctor_get_api_config_value(guild, [
+                    "api_token",
+                    "doctor_api_token",
+                    "bot_api_token",
+                    "mattis_api_token",
+                    "mattis_token",
+                    "api_key",
+                ])
+
+                if found_url:
+                    api_url = str(found_url)
+
+                if found_token:
+                    api_token = str(found_token)
+            except Exception:
+                pass
+
+        return api_url.rstrip("/"), api_token
+
+    async def b4a_fetch_json(self, guild, endpoint: str):
+        import aiohttp
+
+        api_url, api_token = await self.b4a_get_api_config(guild)
+
+        headers = {}
+
+        if api_token:
+            token = str(api_token).strip()
+            headers["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+
+        timeout = aiohttp.ClientTimeout(total=12)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(api_url + endpoint, headers=headers) as resp:
+                text = await resp.text()
+
+                try:
+                    payload = await resp.json(content_type=None)
+                except Exception:
+                    payload = {"raw": text}
+
+                return {
+                    "status": resp.status,
+                    "endpoint": endpoint,
+                    "payload": payload,
+                }
+
+    def b4a_extract_events(self, payload):
+        if isinstance(payload, dict):
+            for key in ["events", "items", "results", "data", "logs", "alerts"]:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [x for x in value if isinstance(x, dict)]
+
+        if isinstance(payload, list):
+            return [x for x in payload if isinstance(x, dict)]
+
+        return []
+
+    async def b4a_fetch_highrisk_events(self, guild):
+        result = await self.b4a_fetch_json(guild, "/bot/audit/highrisk")
+        payload = result.get("payload")
+        events = self.b4a_extract_events(payload)
+
+        return {
+            "status": result.get("status"),
+            "endpoint": result.get("endpoint"),
+            "events": events,
+            "payload": payload,
+        }
+
+    def b4a_group_counts(self, items):
+        counts = {}
+
+        for item in items:
+            key = str(item or "Unknown")
+            counts[key] = counts.get(key, 0) + 1
+
+        return sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+    def b4a_log_summary_lines(self, events: list[dict]) -> list[str]:
+        classified = [self.b4a_classify_log_event(e) for e in events]
+
+        categories = self.b4a_group_counts([x["category"] for x in classified])
+        actors = self.b4a_group_counts([x["actor"] for x in classified])
+        actions = self.b4a_group_counts([x["action"] for x in classified])
+        risks = self.b4a_group_counts([x["risk"] for x in classified])
+        reasons = self.b4a_group_counts([x["reason"] for x in classified])
+
+        high_count = sum(1 for x in classified if x["severity"] in ["high", "critical"])
+        newest = classified[0]["createdAt"] if classified else "Unknown"
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            f"High/critical classified events: `{high_count}`",
+            f"Newest event: `{newest}`",
+            "",
+            "**Categories:**",
+        ]
+
+        if categories:
+            for name, count in categories[:10]:
+                lines.append(f"- `{name}` — `{count}`")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Risk levels:**"])
+
+        if risks:
+            for name, count in risks[:10]:
+                lines.append(f"- `{name}` — `{count}`")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Top actors:**"])
+
+        if actors:
+            for actor, count in actors[:10]:
+                lines.append(f"- `{actor}` — `{count}`")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Top actions:**"])
+
+        if actions:
+            for action, count in actions[:10]:
+                lines.append(f"- `{action}` — `{count}`")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Top reasons:**"])
+
+        if reasons:
+            for reason, count in reasons[:10]:
+                lines.append(f"- {reason} — `{count}`")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    def b4a_event_lines(self, events: list[dict], limit: int = 10) -> list[str]:
+        lines = []
+
+        for idx, event in enumerate(events[:limit], start=1):
+            c = self.b4a_classify_log_event(event)
+
+            emoji = "🚨" if c["severity"] == "critical" else "⚠️" if c["severity"] == "high" else "🟡" if c["severity"] == "medium" else "ℹ️"
+
+            lines.extend([
+                f"{emoji} **Event {idx}**",
+                f"ID: `{c['id'] or 'Unknown'}`",
+                f"Time: `{c['createdAt']}`",
+                f"Actor: `{c['actor']}`",
+                f"Action: `{c['action']}`",
+                f"Risk: `{c['risk']}`",
+                f"Category: `{c['category']}`",
+                f"Reason: {c['reason']}",
+                "",
+            ])
+
+        return lines
+
     @alerts.command(name="sla")
     async def alerts_sla(self, ctx):
         """Show SLA status for tracked alerts."""
