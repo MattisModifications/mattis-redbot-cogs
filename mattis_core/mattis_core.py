@@ -6137,10 +6137,11 @@ class MattisCore(commands.Cog):
         return lines, failures, warnings
 
 
+
     async def doctor_get_api_config_value(self, guild: discord.Guild, names: list[str]):
         cfg = await get_core_config(self.bot)
 
-        # Doctor-specific overrides first.
+        # Doctor-specific settings first. This is where setapi/settoken saves values.
         try:
             doctor_settings = await cfg.guild(guild).doctor_settings()
             doctor_settings = doctor_settings or {}
@@ -6152,6 +6153,7 @@ class MattisCore(commands.Cog):
         except Exception:
             pass
 
+        # Then try direct registered config keys, if any exist.
         for name in names:
             try:
                 value = await getattr(cfg.guild(guild), name)()
@@ -6160,17 +6162,12 @@ class MattisCore(commands.Cog):
             except Exception:
                 pass
 
+        # Then scan all guild config.
         try:
             full = await cfg.guild(guild).all()
         except Exception:
             full = {}
 
-        for name in names:
-            value = full.get(name)
-            if value:
-                return value
-
-        # Recursive search through all config data.
         wanted = {str(x).lower() for x in names}
 
         def scan(obj):
@@ -6180,10 +6177,6 @@ class MattisCore(commands.Cog):
 
                     if key_l in wanted and value:
                         return value
-
-                    if any(part in key_l for part in ["api", "backend", "base", "url", "endpoint"]) and isinstance(value, str):
-                        if value.startswith("http"):
-                            return value
 
                     found = scan(value)
                     if found:
@@ -6222,6 +6215,8 @@ class MattisCore(commands.Cog):
 
             api_token = await self.doctor_get_api_config_value(guild, [
                 "api_token",
+                "doctor_api_token",
+                "bot_api_token",
                 "bot_token",
                 "mattis_token",
                 "mattis_api_token",
@@ -6233,72 +6228,105 @@ class MattisCore(commands.Cog):
             if not api_url:
                 api_url = "https://api.mattisproductions.com"
                 warnings += 1
-                lines.append("⚠️ API URL not saved in bot config. Using default `https://api.mattisproductions.com`.")
+                lines.append("⚠️ API URL not saved. Using default `https://api.mattisproductions.com`.")
 
             api_url = str(api_url).rstrip("/")
             lines.append(f"✅ API URL: `{api_url}`")
 
+            headers = {}
+
             if api_token:
-                lines.append("✅ API token detected: `yes`")
+                token = str(api_token).strip()
+
+                if token.lower().startswith("bearer "):
+                    headers["Authorization"] = token
+                else:
+                    headers["Authorization"] = f"Bearer {token}"
+
+                lines.append("✅ API token: configured")
             else:
                 warnings += 1
-                lines.append("⚠️ API token not detected. Public health endpoints will still be tested.")
+                lines.append("⚠️ API token: not configured. Protected bot endpoints may return 401.")
 
-            endpoints = [
+            protected_endpoints = [
                 "/bot/status",
                 "/bot/command/overview",
+            ]
+
+            public_fallback_endpoints = [
                 "/health",
                 "/status",
                 "/api/health",
                 "/",
             ]
 
-            headers = {}
-
-            if api_token:
-                headers["Authorization"] = f"Bearer {api_token}"
-
-            passed = False
-            auth_seen = False
-            tried = []
-
-            timeout = aiohttp.ClientTimeout(total=8)
+            timeout = aiohttp.ClientTimeout(total=10)
+            protected_passed = False
+            protected_auth_required = []
+            protected_failed = []
 
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                for endpoint in endpoints:
+                for endpoint in protected_endpoints:
                     url = api_url + endpoint
-                    tried.append(endpoint)
 
                     try:
                         async with session.get(url, headers=headers) as resp:
                             text = await resp.text()
-                            sample = text[:120].replace("`", "'").replace("\n", " ")
+                            sample = text[:140].replace("`", "'").replace("\n", " ")
 
                             if 200 <= resp.status < 300:
-                                passed = True
-                                lines.append(f"✅ API endpoint passed: `{endpoint}` returned `{resp.status}`")
-                                break
-
-                            if resp.status in [401, 403]:
-                                auth_seen = True
-                                lines.append(f"ℹ️ API endpoint `{endpoint}` returned `{resp.status}` auth-required.")
-                                continue
-
-                            if resp.status < 500:
-                                lines.append(f"ℹ️ API endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
+                                protected_passed = True
+                                lines.append(f"✅ Protected API endpoint passed: `{endpoint}` returned `{resp.status}`")
+                            elif resp.status in [401, 403]:
+                                protected_auth_required.append(endpoint)
+                                lines.append(f"❌ Protected API endpoint `{endpoint}` returned `{resp.status}` auth-required.")
                             else:
-                                warnings += 1
-                                lines.append(f"⚠️ API endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
+                                protected_failed.append(endpoint)
+                                lines.append(f"⚠️ Protected API endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
 
                     except Exception as exc:
-                        lines.append(f"ℹ️ API endpoint `{endpoint}` failed: `{type(exc).__name__}`")
+                        protected_failed.append(endpoint)
+                        lines.append(f"⚠️ Protected API endpoint `{endpoint}` failed: `{type(exc).__name__}`")
 
-            if not passed:
-                failures += 1
-                if auth_seen:
-                    lines.append("❌ API is reachable but no health endpoint passed without valid auth.")
+                # If protected endpoints failed, still prove API reachability with public fallbacks.
+                public_passed = False
+
+                if not protected_passed:
+                    for endpoint in public_fallback_endpoints:
+                        url = api_url + endpoint
+
+                        try:
+                            async with session.get(url) as resp:
+                                text = await resp.text()
+                                sample = text[:140].replace("`", "'").replace("\n", " ")
+
+                                if 200 <= resp.status < 300:
+                                    public_passed = True
+                                    lines.append(f"✅ Public API reachability passed: `{endpoint}` returned `{resp.status}`")
+                                    break
+
+                                if resp.status < 500:
+                                    lines.append(f"ℹ️ Public endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
+                                else:
+                                    lines.append(f"⚠️ Public endpoint `{endpoint}` returned `{resp.status}`: `{sample}`")
+
+                        except Exception as exc:
+                            lines.append(f"ℹ️ Public endpoint `{endpoint}` failed: `{type(exc).__name__}`")
+
+                if protected_passed:
+                    lines.append("✅ API auth readiness: protected bot endpoint access working.")
                 else:
-                    lines.append(f"❌ No API health endpoint passed. Tried: `{', '.join(tried)}`")
+                    failures += 1
+
+                    if protected_auth_required:
+                        lines.append("❌ API auth readiness failed: protected endpoints require a valid token.")
+                    elif protected_failed:
+                        lines.append("❌ API auth readiness failed: protected endpoints did not return success.")
+                    else:
+                        lines.append("❌ API auth readiness failed: no protected endpoint passed.")
+
+                    if public_passed:
+                        lines.append("ℹ️ API is reachable, but protected bot auth is not passing.")
 
         except Exception as exc:
             failures += 1
@@ -6351,7 +6379,7 @@ class MattisCore(commands.Cog):
         await self.send_paginated(ctx, title, summary + sections, color=color)
 
 
-    @doctor.command(name="setapi")
+
     async def doctor_setapi(self, ctx, api_url: str):
         """Set the API URL used by doctor readiness checks."""
         if not await require_admin(ctx):
@@ -6359,6 +6387,39 @@ class MattisCore(commands.Cog):
 
         if not api_url.startswith("http://") and not api_url.startswith("https://"):
             await ctx.send(embed=error_embed("Invalid API URL", "Use a full URL starting with http:// or https://"))
+            return
+
+        cfg = await get_core_config(self.bot)
+        data = await cfg.guild(ctx.guild).doctor_settings()
+        data = data or {}
+        data["api_url"] = api_url.rstrip("/")
+        await cfg.guild(ctx.guild).doctor_settings.set(data)
+
+        await ctx.send(embed=ok_embed("Doctor API URL saved", f"Doctor will test `{data['api_url']}`."))
+
+
+    async def doctor_clearapi(self, ctx):
+        """Clear the doctor API URL override."""
+        if not await require_admin(ctx):
+            return
+
+        cfg = await get_core_config(self.bot)
+        data = await cfg.guild(ctx.guild).doctor_settings()
+        data = data or {}
+        data.pop("api_url", None)
+        await cfg.guild(ctx.guild).doctor_settings.set(data)
+
+        await ctx.send(embed=ok_embed("Doctor API URL cleared", "Doctor will use detected/default API URL."))
+
+
+    @doctor.command(name="setapi")
+    async def doctor_setapi(self, ctx, api_url: str):
+        """Set the API URL used by doctor readiness checks."""
+        if not await require_admin(ctx):
+            return
+
+        if not api_url.startswith("http://") and not api_url.startswith("https://"):
+            await ctx.send(embed=error_embed("Invalid API URL", "Use a full URL starting with `http://` or `https://`."))
             return
 
         cfg = await get_core_config(self.bot)
@@ -6382,6 +6443,80 @@ class MattisCore(commands.Cog):
         await cfg.guild(ctx.guild).doctor_settings.set(data)
 
         await ctx.send(embed=ok_embed("Doctor API URL cleared", "Doctor will use detected/default API URL."))
+
+    @doctor.command(name="settoken")
+    async def doctor_settoken(self, ctx, *, token: str):
+        """Set the protected API token used by doctor readiness checks."""
+        if not await require_admin(ctx):
+            return
+
+        token = str(token or "").strip()
+
+        if not token:
+            await ctx.send(embed=error_embed("Missing token", "Usage: `!mcore doctor settoken <token>`"))
+            return
+
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+
+        cfg = await get_core_config(self.bot)
+        data = await cfg.guild(ctx.guild).doctor_settings()
+        data = data or {}
+        data["api_token"] = token
+        await cfg.guild(ctx.guild).doctor_settings.set(data)
+
+        deleted = False
+
+        try:
+            await ctx.message.delete()
+            deleted = True
+        except Exception:
+            deleted = False
+
+        msg = "Token saved. I also deleted the command message containing it." if deleted else "Token saved. I could not delete the command message, so delete it manually."
+
+        try:
+            await ctx.author.send("Mattis doctor API token saved. I will never display it back.")
+        except Exception:
+            pass
+
+        await ctx.send(embed=ok_embed("Doctor API token saved", msg))
+
+    @doctor.command(name="cleartoken")
+    async def doctor_cleartoken(self, ctx):
+        """Clear the protected API token used by doctor readiness checks."""
+        if not await require_admin(ctx):
+            return
+
+        cfg = await get_core_config(self.bot)
+        data = await cfg.guild(ctx.guild).doctor_settings()
+        data = data or {}
+        data.pop("api_token", None)
+        await cfg.guild(ctx.guild).doctor_settings.set(data)
+
+        await ctx.send(embed=ok_embed("Doctor API token cleared", "Protected API doctor checks will no longer send a token."))
+
+    @doctor.command(name="auth")
+    async def doctor_auth(self, ctx):
+        """Show whether doctor API auth is configured without revealing secrets."""
+        if not await require_admin(ctx):
+            return
+
+        api_url = await self.doctor_get_api_config_value(ctx.guild, ["api_url"])
+        api_token = await self.doctor_get_api_config_value(ctx.guild, ["api_token", "doctor_api_token", "bot_api_token"])
+
+        lines = [
+            f"API URL configured: `{'yes' if api_url else 'no'}`",
+            f"API token configured: `{'yes' if api_token else 'no'}`",
+            "",
+            "**Commands:**",
+            "`!mcore doctor setapi https://api.mattisproductions.com`",
+            "`!mcore doctor settoken <token>`",
+            "`!mcore doctor cleartoken`",
+            "`!mcore doctor api`",
+        ]
+
+        await self.send_paginated(ctx, "Doctor API Auth", lines)
 
     @doctor.command(name="api")
     async def doctor_api(self, ctx):
