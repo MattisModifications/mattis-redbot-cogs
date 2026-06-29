@@ -2350,6 +2350,1565 @@ class MattisCore(commands.Cog):
 
         return "\n".join(lines)
 
+
+    # ============================================================
+    # B15 — Service Catalogue / Dependency Map
+    # ============================================================
+
+    async def b15_get_service_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("service_catalogue") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("services", {})
+
+        return state
+
+    async def b15_set_service_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["service_catalogue"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b15_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b15_safe(self, value, limit: int = 1000) -> str:
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    def b15_new_service_id(self, state: dict) -> str:
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"SVC-{state['counter']:04d}"
+
+    async def b15_find_service(self, guild, query: str):
+        state = await self.b15_get_service_state(guild)
+        services = state.get("services") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in services:
+            key = q.upper()
+            return key, services[key], state
+
+        for key, item in services.items():
+            haystack = " ".join([
+                key,
+                str(item.get("name", "")),
+                str(item.get("owner", "")),
+                str(item.get("description", "")),
+                " ".join(item.get("endpoints") or []),
+                " ".join(item.get("dependencies") or []),
+            ]).lower()
+
+            if q and q in haystack:
+                return key, item, state
+
+        return None, None, state
+
+    def b15_service_lines(self, service_id: str, svc: dict) -> list[str]:
+        lines = [
+            f"**{service_id} — {svc.get('name')}**",
+            f"Owner: `{svc.get('owner') or 'Unassigned'}`",
+            f"Criticality: `{svc.get('criticality') or 'medium'}`",
+            f"Created: `{svc.get('created_at')}`",
+            "",
+            "**Description:**",
+            svc.get("description") or "No description.",
+            "",
+            "**Endpoints:**",
+        ]
+
+        endpoints = svc.get("endpoints") or []
+
+        if endpoints:
+            for endpoint in endpoints:
+                lines.append(f"- `{endpoint}`")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Dependencies:**"])
+
+        deps = svc.get("dependencies") or []
+
+        if deps:
+            for dep in deps:
+                lines.append(f"- {dep}")
+        else:
+            lines.append("- None")
+
+        lines.extend(["", "**Risks:**"])
+
+        risks = svc.get("risks") or []
+
+        if risks:
+            for risk in risks:
+                lines.append(f"- {risk}")
+        else:
+            lines.append("- None")
+
+        return lines
+
+    async def b15_check_service(self, guild, svc: dict) -> list[dict]:
+        results = []
+
+        if not hasattr(self, "b5_http_get"):
+            return results
+
+        for endpoint in svc.get("endpoints") or []:
+            results.append(await self.b5_http_get(guild, endpoint, timeout_seconds=10))
+
+        return results
+
+    def b15_service_report_text(self, service_id: str, svc: dict, checks: list[dict] | None = None) -> str:
+        lines = [
+            "Mattis CMS | Systems",
+            f"Service Report — {service_id}",
+            "=" * 40,
+            "",
+        ]
+
+        lines.extend([x.replace("**", "") for x in self.b15_service_lines(service_id, svc)])
+
+        if checks is not None:
+            lines.extend(["", "Endpoint Checks", "-" * 40])
+
+            for check in checks:
+                lines.append(f"{check.get('endpoint')} — HTTP {check.get('status')} — {'OK' if check.get('ok') else 'FAILED'} — {check.get('elapsed_ms')}ms")
+
+        return "\n".join(lines)
+
+    @mcore.group(name="service", invoke_without_command=True)
+    async def service(self, ctx):
+        """Service catalogue and dependency map."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Service Catalogue / Dependency Map**",
+            "",
+            "`!mcore service add <name> | <owner> | <description>` — add service",
+            "`!mcore service list` — list services",
+            "`!mcore service show <id/query>` — show service",
+            "`!mcore service endpoint <id/query> <endpoint>` — add endpoint",
+            "`!mcore service dependency <id/query> <dependency>` — add dependency",
+            "`!mcore service risk <id/query> <risk>` — add risk",
+            "`!mcore service criticality <id/query> <critical/high/medium/low>` — set criticality",
+            "`!mcore service check <id/query>` — check service endpoints",
+            "`!mcore service impact <id/query>` — service impact view",
+            "`!mcore service export <id/query>` — export service report",
+            "`!mcore service seed` — seed Mattis default services",
+        ]
+
+        await self.send_paginated(ctx, "Service Catalogue", lines)
+
+    @service.command(name="seed")
+    async def service_seed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b15_get_service_state(ctx.guild)
+        services = state.setdefault("services", {})
+
+        defaults = [
+            ("CMS API", "Ops", "Core backend API for Mattis CMS bot and web platform.", ["api.mattisproductions.com", "Postgres", "Redis"], ["/bot/audit/highrisk", "/bot/support/critical", "/bot/billing/failed"]),
+            ("Billing / Stripe", "Billing", "Stripe billing, subscriptions, invoices and webhook processing.", ["CMS API", "Stripe"], ["/bot/billing/failed", "/bot/billing/pastdue"]),
+            ("Roblox Integration", "Roblox", "Roblox OAuth, Open Cloud and webhook validation.", ["CMS API", "Roblox Open Cloud"], ["/bot/roblox/broken"]),
+            ("Discord Integration", "Discord", "Discord OAuth, bot commands, role/status integration.", ["CMS API", "Discord Bot"], ["/bot/discord/broken"]),
+            ("Security / Audit", "Security", "High-risk audit, suspicious activity and security risk monitoring.", ["CMS API"], ["/bot/audit/highrisk", "/bot/security/risks", "/bot/security/suspicious"]),
+        ]
+
+        created = 0
+
+        existing_names = {str(v.get("name", "")).lower() for v in services.values()}
+
+        for name, owner, desc, deps, endpoints in defaults:
+            if name.lower() in existing_names:
+                continue
+
+            service_id = self.b15_new_service_id(state)
+            services[service_id] = {
+                "id": service_id,
+                "name": name,
+                "owner": owner,
+                "description": desc,
+                "dependencies": deps,
+                "endpoints": endpoints,
+                "risks": [],
+                "criticality": "high" if name in ["CMS API", "Billing / Stripe", "Security / Audit"] else "medium",
+                "created_at": self.b15_now_iso(),
+                "created_by": str(ctx.author),
+            }
+            created += 1
+
+        state["services"] = services
+        await self.b15_set_service_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Service catalogue seeded", f"Created `{created}` default service(s)."))
+
+    @service.command(name="add")
+    async def service_add(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+
+        name = parts[0] if len(parts) > 0 else text
+        owner = parts[1] if len(parts) > 1 else "Unassigned"
+        description = parts[2] if len(parts) > 2 else "No description."
+
+        state = await self.b15_get_service_state(ctx.guild)
+        service_id = self.b15_new_service_id(state)
+
+        state.setdefault("services", {})[service_id] = {
+            "id": service_id,
+            "name": self.b15_safe(name, 240),
+            "owner": self.b15_safe(owner, 160),
+            "description": self.b15_safe(description, 1400),
+            "dependencies": [],
+            "endpoints": [],
+            "risks": [],
+            "criticality": "medium",
+            "created_at": self.b15_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b15_set_service_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Service added", f"`{service_id}` — {name}"))
+
+    @service.command(name="list")
+    async def service_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b15_get_service_state(ctx.guild)
+        services = state.get("services") or {}
+
+        if not services:
+            await ctx.send(embed=info_embed("Service Catalogue", "No services yet. Run `!mcore service seed`."))
+            return
+
+        lines = []
+
+        for service_id, svc in sorted(services.items()):
+            lines.append(f"`{service_id}` — `{svc.get('criticality', 'medium')}` — **{svc.get('name')}** — Owner `{svc.get('owner')}`")
+
+        await self.send_paginated(ctx, "Services", lines)
+
+    @service.command(name="show")
+    async def service_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, _ = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Service Detail", self.b15_service_lines(service_id, svc))
+
+    @service.command(name="endpoint")
+    async def service_endpoint(self, ctx, query: str, endpoint: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, state = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        endpoints = svc.get("endpoints") or []
+
+        if endpoint not in endpoints:
+            endpoints.append(endpoint)
+
+        svc["endpoints"] = endpoints
+        svc["updated_at"] = self.b15_now_iso()
+        state["services"][service_id] = svc
+
+        await self.b15_set_service_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Service endpoint added", f"`{endpoint}` added to `{service_id}`."))
+
+    @service.command(name="dependency")
+    async def service_dependency(self, ctx, query: str, *, dependency: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, state = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        deps = svc.get("dependencies") or []
+
+        if dependency not in deps:
+            deps.append(self.b15_safe(dependency, 240))
+
+        svc["dependencies"] = deps
+        svc["updated_at"] = self.b15_now_iso()
+        state["services"][service_id] = svc
+
+        await self.b15_set_service_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Service dependency added", f"`{dependency}` added to `{service_id}`."))
+
+    @service.command(name="risk")
+    async def service_risk(self, ctx, query: str, *, risk: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, state = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        risks = svc.get("risks") or []
+        risks.append(self.b15_safe(risk, 600))
+
+        svc["risks"] = risks[-30:]
+        svc["updated_at"] = self.b15_now_iso()
+        state["services"][service_id] = svc
+
+        await self.b15_set_service_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Service risk added", f"Risk added to `{service_id}`."))
+
+    @service.command(name="criticality")
+    async def service_criticality(self, ctx, query: str, level: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, state = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        level = str(level or "medium").lower().strip()
+
+        if level not in ["critical", "high", "medium", "low"]:
+            level = "medium"
+
+        svc["criticality"] = level
+        svc["updated_at"] = self.b15_now_iso()
+        state["services"][service_id] = svc
+
+        await self.b15_set_service_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Service criticality updated", f"`{service_id}` is now `{level}`."))
+
+    @service.command(name="check")
+    async def service_check(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, _ = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        checks = await self.b15_check_service(ctx.guild, svc)
+
+        lines = [
+            f"Service: `{service_id}` — **{svc.get('name')}**",
+            f"Endpoints checked: `{len(checks)}`",
+            "",
+        ]
+
+        if checks and hasattr(self, "b5_check_lines"):
+            lines.extend(self.b5_check_lines(checks))
+        elif not checks:
+            lines.append("No endpoints configured.")
+        else:
+            for check in checks:
+                lines.append(f"`{check.get('endpoint')}` — HTTP `{check.get('status')}` — `{check.get('elapsed_ms')}ms`")
+
+        await self.send_paginated(ctx, "Service Endpoint Check", lines)
+
+    @service.command(name="impact")
+    async def service_impact(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        service_id, svc, _ = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        lines = [
+            f"**Impact view for `{service_id}` — {svc.get('name')}**",
+            "",
+            f"Criticality: `{svc.get('criticality', 'medium')}`",
+            f"Owner: `{svc.get('owner')}`",
+            "",
+            "**Likely affected areas:**",
+        ]
+
+        for dep in svc.get("dependencies") or []:
+            lines.append(f"- {dep}")
+
+        if not svc.get("dependencies"):
+            lines.append("- No dependencies documented.")
+
+        lines.extend(["", "**Open incidents mentioning this service:**"])
+
+        found = []
+
+        if hasattr(self, "b7_get_incident_state"):
+            incident_state = await self.b7_get_incident_state(ctx.guild)
+            incidents = incident_state.get("incidents") or {}
+
+            for incident_id, inc in incidents.items():
+                if str(inc.get("status", "open")).lower() == "resolved":
+                    continue
+
+                haystack = " ".join([
+                    str(inc.get("title", "")),
+                    str(inc.get("impact", "")),
+                    str(inc.get("customer_impact", "")),
+                    str(inc.get("internal_impact", "")),
+                    str(inc.get("current_status", "")),
+                    str(inc.get("linked_log_query", "")),
+                ]).lower()
+
+                if str(svc.get("name", "")).lower() in haystack or query.lower() in haystack:
+                    found.append((incident_id, inc))
+
+        if found:
+            for incident_id, inc in found[:10]:
+                lines.append(f"- `{incident_id}` `{inc.get('severity')}` `{inc.get('status')}` — {inc.get('title')}")
+        else:
+            lines.append("- None found.")
+
+        await self.send_paginated(ctx, "Service Impact", lines)
+
+    @service.command(name="export")
+    async def service_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        service_id, svc, _ = await self.b15_find_service(ctx.guild, query)
+
+        if not svc:
+            await ctx.send(embed=info_embed("Service not found", f"No service matched `{query}`."))
+            return
+
+        checks = await self.b15_check_service(ctx.guild, svc)
+        report = self.b15_service_report_text(service_id, svc, checks)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Service report exported", f"Exported `{service_id}`."),
+            file=discord.File(fp, filename=f"mattis-service-{service_id.lower()}.txt")
+        )
+
+    # ============================================================
+    # B16 — Monitoring Centre / Synthetic Checks
+    # ============================================================
+
+    async def b16_get_monitor_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("monitoring_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("checks", {})
+        state.setdefault("history", [])
+
+        return state
+
+    async def b16_set_monitor_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["monitoring_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b16_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b16_new_monitor_id(self, state: dict) -> str:
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"MON-{state['counter']:04d}"
+
+    async def b16_find_monitor(self, guild, query: str):
+        state = await self.b16_get_monitor_state(guild)
+        checks = state.get("checks") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in checks:
+            key = q.upper()
+            return key, checks[key], state
+
+        for key, item in checks.items():
+            haystack = " ".join([
+                key,
+                str(item.get("name", "")),
+                str(item.get("target", "")),
+                str(item.get("service", "")),
+            ]).lower()
+
+            if q and q in haystack:
+                return key, item, state
+
+        return None, None, state
+
+    async def b16_run_one_monitor(self, guild, monitor_id: str, check: dict) -> dict:
+        import aiohttp
+        import time
+
+        target = str(check.get("target") or "").strip()
+        expected = int(check.get("expected_status", 200) or 200)
+
+        if not target:
+            return {
+                "id": monitor_id,
+                "name": check.get("name"),
+                "target": target,
+                "ok": False,
+                "status": 0,
+                "elapsed_ms": 0,
+                "message": "No target configured.",
+                "at": self.b16_now_iso(),
+            }
+
+        if target.startswith("/") and hasattr(self, "b5_http_get"):
+            result = await self.b5_http_get(guild, target, timeout_seconds=10)
+            return {
+                "id": monitor_id,
+                "name": check.get("name"),
+                "target": target,
+                "ok": bool(result.get("ok")),
+                "status": result.get("status"),
+                "elapsed_ms": result.get("elapsed_ms"),
+                "message": result.get("error") or result.get("text_preview") or "OK",
+                "at": self.b16_now_iso(),
+            }
+
+        started = time.perf_counter()
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(target) as resp:
+                    text = await resp.text()
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+                    return {
+                        "id": monitor_id,
+                        "name": check.get("name"),
+                        "target": target,
+                        "ok": resp.status == expected,
+                        "status": resp.status,
+                        "elapsed_ms": elapsed_ms,
+                        "message": str(text or "")[:250] if resp.status != expected else "OK",
+                        "at": self.b16_now_iso(),
+                    }
+
+        except Exception as e:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+            return {
+                "id": monitor_id,
+                "name": check.get("name"),
+                "target": target,
+                "ok": False,
+                "status": 0,
+                "elapsed_ms": elapsed_ms,
+                "message": f"{type(e).__name__}: {e}",
+                "at": self.b16_now_iso(),
+            }
+
+    async def b16_run_monitors(self, guild, query: str = "all") -> list[dict]:
+        state = await self.b16_get_monitor_state(guild)
+        checks = state.get("checks") or {}
+        query_l = str(query or "all").lower().strip()
+
+        selected = []
+
+        if query_l in ["all", "*", ""]:
+            selected = list(checks.items())
+        else:
+            found_id, found, _ = await self.b16_find_monitor(guild, query)
+            if found:
+                selected = [(found_id, found)]
+
+        results = []
+
+        for monitor_id, check in selected:
+            if check.get("removed"):
+                continue
+
+            result = await self.b16_run_one_monitor(guild, monitor_id, check)
+            result["critical"] = bool(check.get("critical"))
+            result["silenced"] = bool(check.get("silenced"))
+            results.append(result)
+
+            check["last_result"] = result
+            check["last_checked_at"] = result.get("at")
+            checks[monitor_id] = check
+
+        history = state.get("history") or []
+        history.append({
+            "at": self.b16_now_iso(),
+            "query": query,
+            "results": results,
+        })
+
+        state["history"] = history[-50:]
+        state["checks"] = checks
+        await self.b16_set_monitor_state(guild, state)
+
+        return results
+
+    def b16_monitor_result_lines(self, results: list[dict]) -> list[str]:
+        lines = []
+
+        for item in results:
+            emoji = "✅" if item.get("ok") else "❌"
+            critical = "critical" if item.get("critical") else "normal"
+            silenced = " silenced" if item.get("silenced") else ""
+            lines.append(f"{emoji} `{item.get('id')}` `{critical}`{silenced} — **{item.get('name')}** — `{item.get('target')}` — HTTP `{item.get('status')}` — `{item.get('elapsed_ms')}ms`")
+
+            if not item.get("ok"):
+                lines.append(f"   Reason: {item.get('message')}")
+
+        return lines
+
+    def b16_monitor_summary(self, results: list[dict]) -> dict:
+        failed = [x for x in results if not x.get("ok") and not x.get("silenced")]
+        critical_failed = [x for x in failed if x.get("critical")]
+
+        return {
+            "total": len(results),
+            "ok": sum(1 for x in results if x.get("ok")),
+            "failed": len(failed),
+            "critical_failed": len(critical_failed),
+            "silenced_failed": sum(1 for x in results if not x.get("ok") and x.get("silenced")),
+        }
+
+    @mcore.group(name="monitor", invoke_without_command=True)
+    async def monitor(self, ctx):
+        """Monitoring centre and synthetic checks."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Monitoring Centre / Synthetic Checks**",
+            "",
+            "`!mcore monitor seed` — seed default API monitors",
+            "`!mcore monitor add <name> | <target> | <critical yes/no>` — add monitor",
+            "`!mcore monitor list` — list monitors",
+            "`!mcore monitor run [id/query/all]` — run monitors",
+            "`!mcore monitor status` — monitor status from last results",
+            "`!mcore monitor history` — recent monitor runs",
+            "`!mcore monitor silence <id/query> <reason>` — silence monitor",
+            "`!mcore monitor unsilence <id/query>` — unsilence monitor",
+            "`!mcore monitor remove <id/query>` — remove monitor",
+            "`!mcore monitor export` — export monitoring report",
+        ]
+
+        await self.send_paginated(ctx, "Monitoring Centre", lines)
+
+    @monitor.command(name="seed")
+    async def monitor_seed(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b16_get_monitor_state(ctx.guild)
+        checks = state.setdefault("checks", {})
+        existing_targets = {str(x.get("target")) for x in checks.values()}
+
+        defaults = [
+            ("Audit high-risk API", "/bot/audit/highrisk", True),
+            ("Support critical API", "/bot/support/critical", True),
+            ("Billing failed API", "/bot/billing/failed", True),
+            ("Security risks API", "/bot/security/risks", True),
+            ("Discord broken API", "/bot/discord/broken", False),
+            ("Roblox broken API", "/bot/roblox/broken", False),
+        ]
+
+        created = 0
+
+        for name, target, critical in defaults:
+            if target in existing_targets:
+                continue
+
+            monitor_id = self.b16_new_monitor_id(state)
+            checks[monitor_id] = {
+                "id": monitor_id,
+                "name": name,
+                "target": target,
+                "expected_status": 200,
+                "critical": critical,
+                "silenced": False,
+                "created_at": self.b16_now_iso(),
+                "created_by": str(ctx.author),
+            }
+            created += 1
+
+        state["checks"] = checks
+        await self.b16_set_monitor_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Monitoring seeded", f"Created `{created}` monitor(s)."))
+
+    @monitor.command(name="add")
+    async def monitor_add(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "Unnamed monitor"
+        target = parts[1] if len(parts) > 1 else ""
+        critical_text = parts[2].lower() if len(parts) > 2 else "no"
+        critical = critical_text in ["yes", "true", "critical", "high", "1"]
+
+        if not target:
+            await ctx.send(embed=error_embed("Monitor target missing", "Use `name | /endpoint-or-url | critical yes/no`."))
+            return
+
+        state = await self.b16_get_monitor_state(ctx.guild)
+        monitor_id = self.b16_new_monitor_id(state)
+
+        state.setdefault("checks", {})[monitor_id] = {
+            "id": monitor_id,
+            "name": self.b15_safe(name, 200) if hasattr(self, "b15_safe") else str(name)[:200],
+            "target": target,
+            "expected_status": 200,
+            "critical": critical,
+            "silenced": False,
+            "created_at": self.b16_now_iso(),
+            "created_by": str(ctx.author),
+        }
+
+        await self.b16_set_monitor_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Monitor added", f"`{monitor_id}` — {name}"))
+
+    @monitor.command(name="list")
+    async def monitor_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b16_get_monitor_state(ctx.guild)
+        checks = state.get("checks") or {}
+
+        if not checks:
+            await ctx.send(embed=info_embed("Monitoring", "No monitors yet. Run `!mcore monitor seed`."))
+            return
+
+        lines = []
+
+        for monitor_id, item in sorted(checks.items()):
+            if item.get("removed"):
+                continue
+
+            critical = "critical" if item.get("critical") else "normal"
+            silenced = " silenced" if item.get("silenced") else ""
+            lines.append(f"`{monitor_id}` — `{critical}`{silenced} — **{item.get('name')}** — `{item.get('target')}`")
+
+        await self.send_paginated(ctx, "Monitors", lines)
+
+    @monitor.command(name="run")
+    async def monitor_run(self, ctx, *, query: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        results = await self.b16_run_monitors(ctx.guild, query)
+        summary = self.b16_monitor_summary(results)
+
+        lines = [
+            f"Monitors checked: `{summary['total']}`",
+            f"OK: `{summary['ok']}`",
+            f"Failed: `{summary['failed']}`",
+            f"Critical failed: `{summary['critical_failed']}`",
+            f"Silenced failed: `{summary['silenced_failed']}`",
+            "",
+        ]
+
+        if results:
+            lines.extend(self.b16_monitor_result_lines(results))
+        else:
+            lines.append("No monitors matched.")
+
+        await self.send_paginated(ctx, "Monitor Run", lines)
+
+    @monitor.command(name="status")
+    async def monitor_status(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b16_get_monitor_state(ctx.guild)
+        checks = state.get("checks") or {}
+
+        results = []
+
+        for monitor_id, item in checks.items():
+            if item.get("removed"):
+                continue
+
+            result = item.get("last_result")
+
+            if result:
+                result["critical"] = bool(item.get("critical"))
+                result["silenced"] = bool(item.get("silenced"))
+                results.append(result)
+
+        summary = self.b16_monitor_summary(results)
+
+        lines = [
+            f"Monitors with results: `{summary['total']}`",
+            f"OK: `{summary['ok']}`",
+            f"Failed: `{summary['failed']}`",
+            f"Critical failed: `{summary['critical_failed']}`",
+            "",
+        ]
+
+        if results:
+            lines.extend(self.b16_monitor_result_lines(results))
+        else:
+            lines.append("No monitor results yet. Run `!mcore monitor run all`.")
+
+        await self.send_paginated(ctx, "Monitor Status", lines)
+
+    @monitor.command(name="history")
+    async def monitor_history(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b16_get_monitor_state(ctx.guild)
+        history = state.get("history") or []
+
+        if not history:
+            await ctx.send(embed=info_embed("Monitor History", "No monitor runs recorded yet."))
+            return
+
+        lines = []
+
+        for run in reversed(history[-20:]):
+            summary = self.b16_monitor_summary(run.get("results") or [])
+            lines.append(f"`{run.get('at')}` — query `{run.get('query')}` — OK `{summary['ok']}` / `{summary['total']}` — failed `{summary['failed']}` — critical failed `{summary['critical_failed']}`")
+
+        await self.send_paginated(ctx, "Monitor History", lines)
+
+    @monitor.command(name="silence")
+    async def monitor_silence(self, ctx, query: str, *, reason: str = "Silenced by admin."):
+        if not await require_admin(ctx):
+            return
+
+        monitor_id, item, state = await self.b16_find_monitor(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Monitor not found", f"No monitor matched `{query}`."))
+            return
+
+        item["silenced"] = True
+        item["silenced_reason"] = self.b15_safe(reason, 600) if hasattr(self, "b15_safe") else str(reason)[:600]
+        item["silenced_by"] = str(ctx.author)
+        item["silenced_at"] = self.b16_now_iso()
+        state["checks"][monitor_id] = item
+
+        await self.b16_set_monitor_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Monitor silenced", f"`{monitor_id}` silenced."))
+
+    @monitor.command(name="unsilence")
+    async def monitor_unsilence(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        monitor_id, item, state = await self.b16_find_monitor(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Monitor not found", f"No monitor matched `{query}`."))
+            return
+
+        item["silenced"] = False
+        item["unsilenced_by"] = str(ctx.author)
+        item["unsilenced_at"] = self.b16_now_iso()
+        state["checks"][monitor_id] = item
+
+        await self.b16_set_monitor_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Monitor unsilenced", f"`{monitor_id}` active again."))
+
+    @monitor.command(name="remove")
+    async def monitor_remove(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        monitor_id, item, state = await self.b16_find_monitor(ctx.guild, query)
+
+        if not item:
+            await ctx.send(embed=info_embed("Monitor not found", f"No monitor matched `{query}`."))
+            return
+
+        item["removed"] = True
+        item["removed_by"] = str(ctx.author)
+        item["removed_at"] = self.b16_now_iso()
+        state["checks"][monitor_id] = item
+
+        await self.b16_set_monitor_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Monitor removed", f"`{monitor_id}` removed."))
+
+    @monitor.command(name="export")
+    async def monitor_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b16_get_monitor_state(ctx.guild)
+        checks = state.get("checks") or {}
+        history = state.get("history") or []
+
+        lines = [
+            "Mattis CMS | Systems",
+            "Monitoring Report",
+            "=" * 40,
+            "",
+            "Monitors",
+            "-" * 40,
+        ]
+
+        for monitor_id, item in sorted(checks.items()):
+            if item.get("removed"):
+                continue
+
+            result = item.get("last_result") or {}
+            lines.append(f"{monitor_id} — {item.get('name')} — {item.get('target')} — critical={item.get('critical')} — last_ok={result.get('ok')} — status={result.get('status')}")
+
+        lines.extend(["", "Recent Runs", "-" * 40])
+
+        for run in history[-20:]:
+            summary = self.b16_monitor_summary(run.get("results") or [])
+            lines.append(f"{run.get('at')} — {run.get('query')} — ok {summary['ok']}/{summary['total']} — failed {summary['failed']}")
+
+        report = "\n".join(lines)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Monitoring report exported", "Exported monitoring report."),
+            file=discord.File(fp, filename="mattis-monitoring-report.txt")
+        )
+
+    # ============================================================
+    # B17 — Communications Centre
+    # ============================================================
+
+    async def b17_get_comms_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("communications_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("drafts", {})
+
+        return state
+
+    async def b17_set_comms_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["communications_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b17_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b17_new_draft_id(self, state: dict) -> str:
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"COM-{state['counter']:04d}"
+
+    async def b17_create_draft(self, guild, draft: dict) -> tuple[str, dict]:
+        state = await self.b17_get_comms_state(guild)
+        draft_id = self.b17_new_draft_id(state)
+
+        draft["id"] = draft_id
+        draft.setdefault("created_at", self.b17_now_iso())
+        draft.setdefault("status", "draft")
+
+        state.setdefault("drafts", {})[draft_id] = draft
+
+        await self.b17_set_comms_state(guild, state)
+        return draft_id, draft
+
+    async def b17_find_draft(self, guild, query: str):
+        state = await self.b17_get_comms_state(guild)
+        drafts = state.get("drafts") or {}
+        q = str(query or "").lower().strip()
+
+        if q.upper() in drafts:
+            key = q.upper()
+            return key, drafts[key], state
+
+        for key, item in drafts.items():
+            haystack = " ".join([
+                key,
+                str(item.get("type", "")),
+                str(item.get("title", "")),
+                str(item.get("body", "")),
+            ]).lower()
+
+            if q and q in haystack:
+                return key, item, state
+
+        return None, None, state
+
+    def b17_draft_lines(self, draft_id: str, draft: dict) -> list[str]:
+        return [
+            f"**{draft_id} — {draft.get('title')}**",
+            f"Type: `{draft.get('type')}`",
+            f"Audience: `{draft.get('audience')}`",
+            f"Status: `{draft.get('status')}`",
+            f"Created: `{draft.get('created_at')}`",
+            "",
+            "**Message:**",
+            draft.get("body") or "No body.",
+        ]
+
+    @mcore.group(name="comms", invoke_without_command=True)
+    async def comms(self, ctx):
+        """Communications centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Communications Centre**",
+            "",
+            "`!mcore comms incident <incident> <internal/customer/resolved>` — draft incident comms",
+            "`!mcore comms release <release>` — draft release comms",
+            "`!mcore comms maintenance <title> | <window> | <impact>` — draft maintenance comms",
+            "`!mcore comms draft <type> <title> | <body>` — add manual draft",
+            "`!mcore comms list` — list drafts",
+            "`!mcore comms show <id/query>` — show draft",
+            "`!mcore comms approve <id/query> <note>` — approve draft",
+            "`!mcore comms archive <id/query> <reason>` — archive draft",
+            "`!mcore comms export <id/query>` — export draft",
+        ]
+
+        await self.send_paginated(ctx, "Communications Centre", lines)
+
+    @comms.command(name="incident")
+    async def comms_incident(self, ctx, incident_query: str, mode: str = "internal"):
+        if not await require_admin(ctx):
+            return
+
+        if not hasattr(self, "b7_find_incident"):
+            await ctx.send(embed=error_embed("Incident system unavailable", "Incident helpers are unavailable."))
+            return
+
+        incident_id, inc, _ = await self.b7_find_incident(ctx.guild, incident_query)
+
+        if not inc:
+            await ctx.send(embed=info_embed("Incident not found", f"No incident matched `{incident_query}`."))
+            return
+
+        if hasattr(self, "b8_notify_lines"):
+            lines = self.b8_notify_lines(incident_id, inc, mode)
+            body = "\n".join([x.replace("**", "") for x in lines])
+        elif hasattr(self, "b7_comms_lines"):
+            body = "\n".join([x.replace("**", "") for x in self.b7_comms_lines(incident_id, inc)])
+        else:
+            body = f"Incident {incident_id}: {inc.get('title')} — {inc.get('current_status')}"
+
+        draft_id, draft = await self.b17_create_draft(ctx.guild, {
+            "type": "incident",
+            "title": f"Incident {incident_id} {mode} update",
+            "audience": mode,
+            "body": body,
+            "created_by": str(ctx.author),
+            "links": {"incident": incident_id},
+        })
+
+        await self.send_paginated(ctx, "Incident Comms Draft", self.b17_draft_lines(draft_id, draft))
+
+    @comms.command(name="release")
+    async def comms_release(self, ctx, *, release_query: str):
+        if not await require_admin(ctx):
+            return
+
+        if not hasattr(self, "b13_find_release"):
+            await ctx.send(embed=error_embed("Release system unavailable", "Release helpers are unavailable."))
+            return
+
+        release_id, rel, _ = await self.b13_find_release(ctx.guild, release_query)
+
+        if not rel:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{release_query}`."))
+            return
+
+        body = "\n".join([
+            f"Release update: {rel.get('name')}",
+            f"Status: {rel.get('status')}",
+            "",
+            "The latest controlled release has been processed through the Mattis release manager.",
+            "Operational checks, approvals and evidence should be reviewed before sharing customer-facing detail.",
+        ])
+
+        draft_id, draft = await self.b17_create_draft(ctx.guild, {
+            "type": "release",
+            "title": f"Release {release_id} update",
+            "audience": "internal",
+            "body": body,
+            "created_by": str(ctx.author),
+            "links": {"release": release_id},
+        })
+
+        await self.send_paginated(ctx, "Release Comms Draft", self.b17_draft_lines(draft_id, draft))
+
+    @comms.command(name="maintenance")
+    async def comms_maintenance(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        parts = [x.strip() for x in text.split("|")]
+        title = parts[0] if len(parts) > 0 else "Maintenance"
+        window = parts[1] if len(parts) > 1 else "Window to be confirmed"
+        impact = parts[2] if len(parts) > 2 else "Impact to be confirmed"
+
+        body = "\n".join([
+            f"Maintenance notice: {title}",
+            "",
+            f"Window: {window}",
+            f"Expected impact: {impact}",
+            "",
+            "We will monitor the service during the maintenance window and provide updates if anything changes.",
+        ])
+
+        draft_id, draft = await self.b17_create_draft(ctx.guild, {
+            "type": "maintenance",
+            "title": title,
+            "audience": "customer",
+            "body": body,
+            "created_by": str(ctx.author),
+            "links": {},
+        })
+
+        await self.send_paginated(ctx, "Maintenance Comms Draft", self.b17_draft_lines(draft_id, draft))
+
+    @comms.command(name="draft")
+    async def comms_draft(self, ctx, draft_type: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            title, body = [x.strip() for x in text.split("|", 1)]
+        else:
+            title = text
+            body = ""
+
+        draft_id, draft = await self.b17_create_draft(ctx.guild, {
+            "type": draft_type,
+            "title": self.b15_safe(title, 240) if hasattr(self, "b15_safe") else str(title)[:240],
+            "audience": "internal",
+            "body": self.b15_safe(body, 3000) if hasattr(self, "b15_safe") else str(body)[:3000],
+            "created_by": str(ctx.author),
+            "links": {},
+        })
+
+        await self.send_paginated(ctx, "Comms Draft", self.b17_draft_lines(draft_id, draft))
+
+    @comms.command(name="list")
+    async def comms_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b17_get_comms_state(ctx.guild)
+        drafts = state.get("drafts") or {}
+
+        if not drafts:
+            await ctx.send(embed=info_embed("Comms Drafts", "No comms drafts yet."))
+            return
+
+        lines = []
+
+        for draft_id, draft in sorted(drafts.items(), reverse=True):
+            lines.append(f"`{draft_id}` — `{draft.get('type')}` `{draft.get('status')}` — {draft.get('title')}")
+
+        await self.send_paginated(ctx, "Comms Drafts", lines)
+
+    @comms.command(name="show")
+    async def comms_show(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        draft_id, draft, _ = await self.b17_find_draft(ctx.guild, query)
+
+        if not draft:
+            await ctx.send(embed=info_embed("Draft not found", f"No draft matched `{query}`."))
+            return
+
+        await self.send_paginated(ctx, "Comms Draft", self.b17_draft_lines(draft_id, draft))
+
+    @comms.command(name="approve")
+    async def comms_approve(self, ctx, query: str, *, note: str = "Approved."):
+        if not await require_admin(ctx):
+            return
+
+        draft_id, draft, state = await self.b17_find_draft(ctx.guild, query)
+
+        if not draft:
+            await ctx.send(embed=info_embed("Draft not found", f"No draft matched `{query}`."))
+            return
+
+        draft["status"] = "approved"
+        draft["approved_by"] = str(ctx.author)
+        draft["approved_at"] = self.b17_now_iso()
+        draft["approval_note"] = self.b15_safe(note, 1000) if hasattr(self, "b15_safe") else str(note)[:1000]
+
+        state["drafts"][draft_id] = draft
+        await self.b17_set_comms_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Comms draft approved", f"`{draft_id}` approved."))
+
+    @comms.command(name="archive")
+    async def comms_archive(self, ctx, query: str, *, reason: str = "Archived."):
+        if not await require_admin(ctx):
+            return
+
+        draft_id, draft, state = await self.b17_find_draft(ctx.guild, query)
+
+        if not draft:
+            await ctx.send(embed=info_embed("Draft not found", f"No draft matched `{query}`."))
+            return
+
+        draft["status"] = "archived"
+        draft["archived_by"] = str(ctx.author)
+        draft["archived_at"] = self.b17_now_iso()
+        draft["archive_reason"] = self.b15_safe(reason, 1000) if hasattr(self, "b15_safe") else str(reason)[:1000]
+
+        state["drafts"][draft_id] = draft
+        await self.b17_set_comms_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Comms draft archived", f"`{draft_id}` archived."))
+
+    @comms.command(name="export")
+    async def comms_export(self, ctx, *, query: str):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        draft_id, draft, _ = await self.b17_find_draft(ctx.guild, query)
+
+        if not draft:
+            await ctx.send(embed=info_embed("Draft not found", f"No draft matched `{query}`."))
+            return
+
+        report = "\n".join([x.replace("**", "") for x in self.b17_draft_lines(draft_id, draft)])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Comms draft exported", f"Exported `{draft_id}`."),
+            file=discord.File(fp, filename=f"mattis-comms-{draft_id.lower()}.txt")
+        )
+
+    # ============================================================
+    # B18 — Changelog / Release Notes Centre
+    # ============================================================
+
+    async def b18_get_changelog_state(self, guild) -> dict:
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("changelog_centre") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("entries", {})
+        state.setdefault("published", [])
+
+        return state
+
+    async def b18_set_changelog_state(self, guild, state: dict):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["changelog_centre"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b18_now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b18_new_entry_id(self, state: dict) -> str:
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"CHG-{state['counter']:04d}"
+
+    def b18_notes_lines_from_entries(self, entries: list[tuple[str, dict]], title: str = "Release Notes") -> list[str]:
+        groups = {
+            "added": [],
+            "changed": [],
+            "fixed": [],
+            "security": [],
+            "removed": [],
+            "other": [],
+        }
+
+        for entry_id, item in entries:
+            typ = str(item.get("type") or "other").lower().strip()
+            if typ not in groups:
+                typ = "other"
+            groups[typ].append((entry_id, item))
+
+        lines = [
+            f"**{title}**",
+            "",
+        ]
+
+        labels = [
+            ("added", "Added"),
+            ("changed", "Changed"),
+            ("fixed", "Fixed"),
+            ("security", "Security"),
+            ("removed", "Removed"),
+            ("other", "Other"),
+        ]
+
+        for key, label in labels:
+            if not groups[key]:
+                continue
+
+            lines.append(f"**{label}:**")
+            for entry_id, item in groups[key]:
+                lines.append(f"- `{entry_id}` {item.get('title')} — {item.get('details')}")
+            lines.append("")
+
+        return lines
+
+    @mcore.group(name="changelog", invoke_without_command=True)
+    async def changelog(self, ctx):
+        """Changelog and release notes centre."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Changelog / Release Notes Centre**",
+            "",
+            "`!mcore changelog add <added/changed/fixed/security/removed> <title> | <details>` — add entry",
+            "`!mcore changelog from-release <release>` — create entry from release",
+            "`!mcore changelog list` — list entries",
+            "`!mcore changelog notes` — build release notes",
+            "`!mcore changelog publish <version> <note>` — mark notes published",
+            "`!mcore changelog published` — publication history",
+            "`!mcore changelog export` — export release notes",
+        ]
+
+        await self.send_paginated(ctx, "Changelog", lines)
+
+    @changelog.command(name="add")
+    async def changelog_add(self, ctx, entry_type: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            title, details = [x.strip() for x in text.split("|", 1)]
+        else:
+            title = text.strip()
+            details = ""
+
+        entry_type = str(entry_type or "other").lower().strip()
+
+        if entry_type not in ["added", "changed", "fixed", "security", "removed"]:
+            entry_type = "other"
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        entry_id = self.b18_new_entry_id(state)
+
+        state.setdefault("entries", {})[entry_id] = {
+            "id": entry_id,
+            "type": entry_type,
+            "title": self.b15_safe(title, 240) if hasattr(self, "b15_safe") else str(title)[:240],
+            "details": self.b15_safe(details, 1200) if hasattr(self, "b15_safe") else str(details)[:1200],
+            "created_at": self.b18_now_iso(),
+            "created_by": str(ctx.author),
+            "published": False,
+        }
+
+        await self.b18_set_changelog_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Changelog entry added", f"`{entry_id}` — {title}"))
+
+    @changelog.command(name="from-release")
+    async def changelog_from_release(self, ctx, *, release_query: str):
+        if not await require_admin(ctx):
+            return
+
+        if not hasattr(self, "b13_find_release"):
+            await ctx.send(embed=error_embed("Release system unavailable", "Release helpers are unavailable."))
+            return
+
+        release_id, rel, _ = await self.b13_find_release(ctx.guild, release_query)
+
+        if not rel:
+            await ctx.send(embed=info_embed("Release not found", f"No release matched `{release_query}`."))
+            return
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        entry_id = self.b18_new_entry_id(state)
+
+        state.setdefault("entries", {})[entry_id] = {
+            "id": entry_id,
+            "type": "changed",
+            "title": f"{release_id}: {rel.get('name')}",
+            "details": f"Release completed with status `{rel.get('status')}`. Review release report for approvals and timeline.",
+            "created_at": self.b18_now_iso(),
+            "created_by": str(ctx.author),
+            "published": False,
+            "links": {"release": release_id},
+        }
+
+        await self.b18_set_changelog_state(ctx.guild, state)
+        await ctx.send(embed=ok_embed("Changelog entry created from release", f"`{entry_id}` linked to `{release_id}`."))
+
+    @changelog.command(name="list")
+    async def changelog_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        entries = state.get("entries") or {}
+
+        if not entries:
+            await ctx.send(embed=info_embed("Changelog", "No changelog entries yet."))
+            return
+
+        lines = []
+
+        for entry_id, item in sorted(entries.items(), reverse=True):
+            published = "published" if item.get("published") else "draft"
+            lines.append(f"`{entry_id}` — `{item.get('type')}` `{published}` — {item.get('title')}")
+
+        await self.send_paginated(ctx, "Changelog Entries", lines)
+
+    @changelog.command(name="notes")
+    async def changelog_notes(self, ctx, mode: str = "draft"):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        entries = state.get("entries") or {}
+
+        items = list(entries.items())
+
+        if mode.lower() in ["draft", "unpublished"]:
+            items = [(k, v) for k, v in items if not v.get("published")]
+
+        if not items:
+            await ctx.send(embed=info_embed("Release Notes", "No entries matched."))
+            return
+
+        lines = self.b18_notes_lines_from_entries(items, title="Draft Release Notes" if mode.lower() in ["draft", "unpublished"] else "Release Notes")
+        await self.send_paginated(ctx, "Release Notes", lines)
+
+    @changelog.command(name="publish")
+    async def changelog_publish(self, ctx, version: str, *, note: str = ""):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        entries = state.get("entries") or {}
+        unpublished = [(k, v) for k, v in entries.items() if not v.get("published")]
+
+        if not unpublished:
+            await ctx.send(embed=info_embed("Publish Changelog", "No unpublished changelog entries to publish."))
+            return
+
+        for entry_id, item in unpublished:
+            item["published"] = True
+            item["published_at"] = self.b18_now_iso()
+            item["published_by"] = str(ctx.author)
+            item["published_version"] = version
+            entries[entry_id] = item
+
+        state["entries"] = entries
+        state.setdefault("published", []).append({
+            "version": version,
+            "at": self.b18_now_iso(),
+            "by": str(ctx.author),
+            "note": self.b15_safe(note, 1200) if hasattr(self, "b15_safe") else str(note)[:1200],
+            "entry_ids": [k for k, _ in unpublished],
+        })
+
+        await self.b18_set_changelog_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Changelog published", f"Published `{len(unpublished)}` entries as `{version}`."))
+
+    @changelog.command(name="published")
+    async def changelog_published(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        published = state.get("published") or []
+
+        if not published:
+            await ctx.send(embed=info_embed("Published Changelogs", "No changelog publications yet."))
+            return
+
+        lines = []
+
+        for item in reversed(published[-20:]):
+            lines.append(f"`{item.get('version')}` — `{item.get('at')}` by `{item.get('by')}` — entries `{len(item.get('entry_ids') or [])}` — {item.get('note')}")
+
+        await self.send_paginated(ctx, "Published Changelogs", lines)
+
+    @changelog.command(name="export")
+    async def changelog_export(self, ctx, mode: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        state = await self.b18_get_changelog_state(ctx.guild)
+        entries = state.get("entries") or {}
+        items = list(entries.items())
+
+        if mode.lower() in ["draft", "unpublished"]:
+            items = [(k, v) for k, v in items if not v.get("published")]
+
+        lines = self.b18_notes_lines_from_entries(items, title="Mattis CMS Release Notes")
+        report = "\n".join([x.replace("**", "") for x in lines])
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Release notes exported", "Exported changelog/release notes."),
+            file=discord.File(fp, filename="mattis-release-notes.txt")
+        )
+
     @mcore.group(name="contract", invoke_without_command=True)
     async def contract(self, ctx):
         """API route contract centre."""
