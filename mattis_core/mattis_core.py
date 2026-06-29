@@ -5526,6 +5526,463 @@ class MattisCore(commands.Cog):
 
         return False
 
+
+    def b4mega_safe(self, value, limit: int = 400):
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    def b4mega_event_identity(self, event: dict) -> str:
+        c = self.b4a_classify_log_event(event)
+        return c.get("id") or c.get("reason") or c.get("action") or "unknown"
+
+    def b4mega_event_score(self, event: dict) -> int:
+        c = self.b4a_classify_log_event(event)
+        score = 0
+
+        severity = str(c.get("severity", "")).lower()
+        category = str(c.get("category", "")).lower()
+        reason = str(c.get("reason", "")).lower()
+        action = str(c.get("action", "")).lower()
+
+        if severity == "critical":
+            score += 10
+        elif severity == "high":
+            score += 7
+        elif severity == "medium":
+            score += 4
+        else:
+            score += 1
+
+        if "secrets" in category or "token" in category:
+            score += 8
+
+        if any(x in reason for x in ["secret", "token", "key", "webhook"]):
+            score += 8
+
+        if any(x in reason for x in ["stripe", "billing", "invoice"]):
+            score += 6
+
+        if "roblox" in reason:
+            score += 5
+
+        if any(x in reason for x in ["oauth", "discord"]):
+            score += 4
+
+        if "setting.updated" in action:
+            score += 3
+
+        return score
+
+    def b4mega_overall_severity(self, events: list[dict]) -> str:
+        if not events:
+            return "low"
+
+        max_score = max(self.b4mega_event_score(e) for e in events)
+
+        if max_score >= 22:
+            return "critical"
+        if max_score >= 15:
+            return "high"
+        if max_score >= 8:
+            return "medium"
+        return "low"
+
+    def b4mega_get_related_events(self, events: list[dict], query: str, limit: int = 20) -> tuple[dict | None, list[dict]]:
+        base = None
+        query_l = str(query or "").lower().strip()
+
+        scored_bases = []
+
+        for event in events:
+            c = self.b4a_classify_log_event(event)
+            haystack = " ".join([
+                c.get("id", ""),
+                c.get("actor", ""),
+                c.get("action", ""),
+                c.get("category", ""),
+                c.get("reason", ""),
+                c.get("risk", ""),
+            ]).lower()
+
+            if query_l in haystack:
+                score = 0
+
+                if query_l in str(c.get("id", "")).lower():
+                    score += 50
+                if query_l in str(c.get("reason", "")).lower():
+                    score += 30
+                if query_l in str(c.get("category", "")).lower():
+                    score += 15
+                if c.get("category") == "Secrets / Tokens":
+                    score += 20
+                if c.get("action") == "platform.setting.updated":
+                    score += 10
+                if c.get("category") == "General":
+                    score -= 25
+
+                scored_bases.append((score, event))
+
+        if scored_bases:
+            scored_bases.sort(key=lambda x: x[0], reverse=True)
+            base = scored_bases[0][1]
+
+        if not base and hasattr(self, "b4b_find_single_event"):
+            base = self.b4b_find_single_event(events, query)
+
+        if not base:
+            return None, []
+
+        related = []
+
+        for event in events:
+            if self.b4mega_event_identity(event) == self.b4mega_event_identity(base):
+                continue
+
+            score = 0
+            meaningful = False
+
+            if hasattr(self, "b4c_related_score"):
+                score = self.b4c_related_score(base, event)
+
+            if hasattr(self, "b4c_is_meaningfully_related"):
+                meaningful = self.b4c_is_meaningfully_related(base, event, score)
+            else:
+                meaningful = score >= 10
+
+            if meaningful:
+                related.append((score, event))
+
+        related.sort(key=lambda x: x[0], reverse=True)
+
+        return base, [event for score, event in related[:limit]]
+
+    def b4mega_group_by(self, events: list[dict], field: str) -> list[tuple[str, int]]:
+        counts = {}
+
+        for event in events:
+            c = self.b4a_classify_log_event(event)
+            key = c.get(field) or "Unknown"
+            counts[key] = counts.get(key, 0) + 1
+
+        return sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+    def b4mega_affected_areas(self, events: list[dict]) -> list[str]:
+        areas = set()
+
+        for event in events:
+            c = self.b4a_classify_log_event(event)
+            reason = str(c.get("reason", "")).lower()
+            category = str(c.get("category", "")).lower()
+
+            if "billing" in reason or "stripe" in reason:
+                areas.add("Billing / Stripe")
+            if "roblox" in reason:
+                areas.add("Roblox Integration")
+            if "discord" in reason:
+                areas.add("Discord OAuth / Bot Integration")
+            if "oauth" in reason:
+                areas.add("OAuth Authentication")
+            if "secret" in reason or "token" in reason or "key" in reason or "webhook" in reason or "secrets" in category:
+                areas.add("Secrets / Tokens / Webhooks")
+            if "entitlement" in reason or "entitlement" in str(c.get("action", "")).lower():
+                areas.add("Entitlements / Access Matrix")
+            if "role" in reason or "permission" in reason or "access" in reason:
+                areas.add("Roles / Permissions / Access Control")
+            if "setting" in str(c.get("action", "")).lower():
+                areas.add("Platform Settings")
+
+        return sorted(areas) or ["General Operations"]
+
+    def b4mega_recommendations_for_events(self, events: list[dict]) -> list[str]:
+        areas = self.b4mega_affected_areas(events)
+        recs = []
+
+        if "Secrets / Tokens / Webhooks" in areas:
+            recs.extend([
+                "Confirm every secret/token/webhook change was intentional and performed by an authorised admin.",
+                "Verify no secret values were posted in Discord, logs, screenshots, commits, or support channels.",
+                "Confirm old webhook/token values are no longer active if a rotation occurred.",
+            ])
+
+        if "Billing / Stripe" in areas:
+            recs.extend([
+                "Check Stripe dashboard/webhook delivery for failed or suspicious events after the secret/key update.",
+                "Confirm billing webhooks are signing correctly and invoice/subscription events are still reaching the API.",
+                "Run a safe billing test flow if available.",
+            ])
+
+        if "Roblox Integration" in areas:
+            recs.extend([
+                "Confirm Roblox OAuth, Open Cloud API, and webhook signing flows still work after the changes.",
+                "Run a verification/sync test from the CMS side and check API logs.",
+            ])
+
+        if "Discord OAuth / Bot Integration" in areas:
+            recs.extend([
+                "Confirm Discord OAuth callback/login still works.",
+                "Confirm the bot still has expected permissions and command responses are healthy.",
+            ])
+
+        if "Entitlements / Access Matrix" in areas:
+            recs.extend([
+                "Review entitlement matrix changes against the intended role/access design.",
+                "Check no customer, staff, or executive access was granted incorrectly.",
+            ])
+
+        if "Roles / Permissions / Access Control" in areas:
+            recs.extend([
+                "Run capability/access matrix checks and confirm sensitive commands remain restricted.",
+                "Review staff roles for accidental broad permissions.",
+            ])
+
+        recs.extend([
+            "Add an alert note documenting whether this was expected maintenance, migration, setup, or suspicious activity.",
+            "Escalate if the actor, timing, or reason does not match expected work.",
+        ])
+
+        # Dedupe while preserving order.
+        seen = set()
+        unique = []
+
+        for rec in recs:
+            if rec not in seen:
+                seen.add(rec)
+                unique.append(rec)
+
+        return unique
+
+    def b4mega_runbook_for_events(self, events: list[dict]) -> list[str]:
+        areas = self.b4mega_affected_areas(events)
+
+        lines = [
+            "**Immediate triage:**",
+            "1. Confirm whether the activity was expected, planned, or part of a setup/migration.",
+            "2. Confirm the actor account is authorised.",
+            "3. Check the related alert timeline and notes.",
+            "4. Confirm whether customer-facing systems are impacted.",
+            "",
+            "**Area-specific checks:**",
+        ]
+
+        if "Billing / Stripe" in areas:
+            lines.extend([
+                "",
+                "**Billing / Stripe:**",
+                "- Check Stripe webhook endpoint status.",
+                "- Confirm webhook signing secret matches the API environment.",
+                "- Check recent billing event delivery attempts.",
+                "- Confirm subscriptions, invoices, and customer access were not disrupted.",
+            ])
+
+        if "Roblox Integration" in areas:
+            lines.extend([
+                "",
+                "**Roblox:**",
+                "- Confirm Roblox OAuth client ID/secret are correct.",
+                "- Confirm Open Cloud API key is active and scoped properly.",
+                "- Confirm Roblox webhook signing secret matches CMS/API config.",
+                "- Run a test verification/sync workflow.",
+            ])
+
+        if "Discord OAuth / Bot Integration" in areas:
+            lines.extend([
+                "",
+                "**Discord:**",
+                "- Confirm Discord OAuth client ID/secret are correct.",
+                "- Confirm callback URL is correct.",
+                "- Confirm the bot is online and responding.",
+                "- Check command permission failures.",
+            ])
+
+        if "Secrets / Tokens / Webhooks" in areas:
+            lines.extend([
+                "",
+                "**Secrets / Tokens / Webhooks:**",
+                "- Do not paste actual secrets into Discord.",
+                "- Confirm whether this was a rotation.",
+                "- Disable old values where appropriate.",
+                "- Check GitHub commits and screenshots for accidental exposure.",
+            ])
+
+        if "Entitlements / Access Matrix" in areas:
+            lines.extend([
+                "",
+                "**Entitlements / Access Matrix:**",
+                "- Review entitlement matrix changes.",
+                "- Confirm who gained or lost access.",
+                "- Run access/capability matrix checks.",
+                "- Confirm customer-facing access rules still match policy.",
+            ])
+
+        lines.extend([
+            "",
+            "**Close-out:**",
+            "- Add a note to the alert.",
+            "- Resolve the alert only once the API evidence is expected/accepted.",
+            "- Export an investigation report if this needs keeping.",
+        ])
+
+        return lines
+
+    def b4mega_incident_classification(self, events: list[dict]) -> dict:
+        severity = self.b4mega_overall_severity(events)
+        areas = self.b4mega_affected_areas(events)
+
+        customer_impact = "No confirmed customer impact from audit evidence alone."
+        internal_impact = "Internal operational review required."
+
+        if "Billing / Stripe" in areas:
+            customer_impact = "Possible customer impact if billing webhooks, subscriptions, invoice handling, or customer access were disrupted."
+
+        if "Roblox Integration" in areas:
+            customer_impact = "Possible customer impact if Roblox verification, sync, or customer product integrations were disrupted."
+
+        if "Secrets / Tokens / Webhooks" in areas:
+            internal_impact = "Sensitive secret/token/webhook configuration changed. This requires confirmation, rotation review, and access validation."
+
+        if "Entitlements / Access Matrix" in areas:
+            internal_impact = "Access or entitlement configuration changed. Staff/customer permissions should be reviewed."
+
+        return {
+            "severity": severity,
+            "areas": areas,
+            "customer_impact": customer_impact,
+            "internal_impact": internal_impact,
+        }
+
+    def b4mega_packet_lines(self, base: dict, related: list[dict], query: str) -> list[str]:
+        events = [base] + list(related or [])
+        classification = self.b4mega_incident_classification(events)
+        base_c = self.b4a_classify_log_event(base)
+
+        actors = self.b4mega_group_by(events, "actor")
+        actions = self.b4mega_group_by(events, "action")
+        categories = self.b4mega_group_by(events, "category")
+        reasons = self.b4mega_group_by(events, "reason")
+        recommendations = self.b4mega_recommendations_for_events(events)
+
+        lines = [
+            f"**Investigation Packet for `{query}`**",
+            "",
+            "**Base event:**",
+            f"ID: `{base_c['id'] or 'Unknown'}`",
+            f"Time: `{base_c['createdAt']}`",
+            f"Actor: `{base_c['actor']}`",
+            f"Action: `{base_c['action']}`",
+            f"Category: `{base_c['category']}`",
+            f"Risk: `{base_c['risk']}`",
+            f"Reason: {base_c['reason']}",
+            "",
+            "**Incident classification:**",
+            f"Severity: `{classification['severity'].title()}`",
+            f"Affected areas: `{', '.join(classification['areas'])}`",
+            f"Customer impact: {classification['customer_impact']}",
+            f"Internal impact: {classification['internal_impact']}",
+            "",
+            f"Related events: `{len(related or [])}`",
+            f"Events in packet: `{len(events)}`",
+            "",
+            "**Actors:**",
+        ]
+
+        for actor, count in actors[:10]:
+            lines.append(f"- `{actor}` — `{count}`")
+
+        lines.extend(["", "**Actions:**"])
+
+        for action, count in actions[:10]:
+            lines.append(f"- `{action}` — `{count}`")
+
+        lines.extend(["", "**Categories:**"])
+
+        for category, count in categories[:10]:
+            lines.append(f"- `{category}` — `{count}`")
+
+        lines.extend(["", "**Top reasons:**"])
+
+        for reason, count in reasons[:10]:
+            lines.append(f"- {reason} — `{count}`")
+
+        lines.extend(["", "**Recommended actions:**"])
+
+        for rec in recommendations[:12]:
+            lines.append(f"- {rec}")
+
+        lines.extend([
+            "",
+            "**Useful commands:**",
+            f"`!mcore logs report {query}`",
+            f"`!mcore logs export {query}`",
+            f"`!mcore logs runbook {query}`",
+            f"`!mcore alerts note audit <note>`",
+            f"`!mcore alerts escalate audit <note>`",
+            f"`!mcore alerts resolve audit <note>`",
+        ])
+
+        return lines
+
+    def b4mega_report_text(self, base: dict, related: list[dict], query: str) -> str:
+        events = [base] + list(related or [])
+        classification = self.b4mega_incident_classification(events)
+        lines = []
+
+        lines.extend([
+            "Mattis CMS | Systems",
+            "Operations Investigation Report",
+            "=" * 40,
+            "",
+            f"Query: {query}",
+            f"Severity: {classification['severity'].title()}",
+            f"Affected areas: {', '.join(classification['areas'])}",
+            "",
+            f"Customer impact: {classification['customer_impact']}",
+            f"Internal impact: {classification['internal_impact']}",
+            "",
+            f"Total events in report: {len(events)}",
+            "",
+            "Events",
+            "-" * 40,
+        ])
+
+        for idx, event in enumerate(events, start=1):
+            c = self.b4a_classify_log_event(event)
+
+            lines.extend([
+                f"{idx}. {c['id'] or 'Unknown'}",
+                f"   Time: {c['createdAt']}",
+                f"   Actor: {c['actor']}",
+                f"   Action: {c['action']}",
+                f"   Category: {c['category']}",
+                f"   Risk: {c['risk']}",
+                f"   Reason: {c['reason']}",
+                "",
+            ])
+
+        lines.extend([
+            "",
+            "Recommendations",
+            "-" * 40,
+        ])
+
+        for rec in self.b4mega_recommendations_for_events(events):
+            lines.append(f"- {rec}")
+
+        lines.extend([
+            "",
+            "Runbook",
+            "-" * 40,
+        ])
+
+        for line in self.b4mega_runbook_for_events(events):
+            # Remove Discord markdown noise for export.
+            lines.append(line.replace("**", ""))
+
+        return "\n".join(lines)
+
     @mcore.group(name="logs", invoke_without_command=True)
 
     async def logs(self, ctx):
@@ -5559,6 +6016,362 @@ class MattisCore(commands.Cog):
 
 
 
+
+
+    @logs.command(name="brief")
+    async def logs_brief(self, ctx, *, query: str):
+        """Create a short investigation brief for a log query/event."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=10)
+
+        if not base:
+            await ctx.send(embed=info_embed("Investigation Brief", f"No event matched `{query}`."))
+            return
+
+        packet_events = [base] + related
+        classification = self.b4mega_incident_classification(packet_events)
+        base_c = self.b4a_classify_log_event(base)
+
+        lines = [
+            f"**Brief for `{query}`**",
+            "",
+            f"Base event: `{base_c['id'] or 'Unknown'}`",
+            f"Reason: {base_c['reason']}",
+            f"Severity: `{classification['severity'].title()}`",
+            f"Affected areas: `{', '.join(classification['areas'])}`",
+            f"Related events: `{len(related)}`",
+            "",
+            f"Customer impact: {classification['customer_impact']}",
+            f"Internal impact: {classification['internal_impact']}",
+            "",
+            "**Top recommendations:**",
+        ]
+
+        for rec in self.b4mega_recommendations_for_events(packet_events)[:6]:
+            lines.append(f"- {rec}")
+
+        await self.send_paginated(ctx, "Investigation Brief", lines)
+
+    @logs.command(name="packet")
+    async def logs_packet(self, ctx, *, query: str):
+        """Create a full investigation packet for a log query/event."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+        if not base:
+            await ctx.send(embed=info_embed("Investigation Packet", f"No event matched `{query}`."))
+            return
+
+        lines = self.b4mega_packet_lines(base, related, query)
+        await self.send_paginated(ctx, "Investigation Packet", lines)
+
+    @logs.command(name="incident")
+    async def logs_incident(self, ctx, *, query: str):
+        """Create an incident-style summary for a log query/event."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+        if not base:
+            await ctx.send(embed=info_embed("Incident Summary", f"No event matched `{query}`."))
+            return
+
+        packet_events = [base] + related
+        classification = self.b4mega_incident_classification(packet_events)
+        base_c = self.b4a_classify_log_event(base)
+
+        lines = [
+            "**Incident-style summary**",
+            "",
+            f"Trigger: `{base_c['id'] or 'Unknown'}`",
+            f"Trigger reason: {base_c['reason']}",
+            f"Severity: `{classification['severity'].title()}`",
+            f"Affected areas: `{', '.join(classification['areas'])}`",
+            f"Related evidence events: `{len(related)}`",
+            "",
+            "**Impact:**",
+            f"- Customer: {classification['customer_impact']}",
+            f"- Internal: {classification['internal_impact']}",
+            "",
+            "**Likely scenario:**",
+            "This appears to be a related group of high-risk platform changes. Review whether it was planned setup, migration, secret rotation, OAuth configuration, or suspicious account activity.",
+            "",
+            "**Immediate response:**",
+        ]
+
+        for rec in self.b4mega_recommendations_for_events(packet_events)[:8]:
+            lines.append(f"- {rec}")
+
+        lines.extend([
+            "",
+            "**Close-out requirement:**",
+            "- Add a note to the alert documenting whether this was expected.",
+            "- Resolve only after the API evidence is accepted as safe or expected.",
+        ])
+
+        await self.send_paginated(ctx, "Incident Summary", lines)
+
+    @logs.command(name="executive")
+    async def logs_executive(self, ctx):
+        """Create an executive summary of the current high-risk audit feed."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        if not events:
+            await ctx.send(embed=ok_embed("Executive Log Summary", "No high-risk audit events returned by the API."))
+            return
+
+        classification = self.b4mega_incident_classification(events)
+        actors = self.b4mega_group_by(events, "actor")
+        categories = self.b4mega_group_by(events, "category")
+        actions = self.b4mega_group_by(events, "action")
+
+        lines = [
+            "**Executive Summary — High-Risk Audit Feed**",
+            "",
+            f"Events analysed: `{len(events)}`",
+            f"Overall severity: `{classification['severity'].title()}`",
+            f"Affected areas: `{', '.join(classification['areas'])}`",
+            "",
+            f"Customer impact: {classification['customer_impact']}",
+            f"Internal impact: {classification['internal_impact']}",
+            "",
+            "**Main actors:**",
+        ]
+
+        for actor, count in actors[:5]:
+            lines.append(f"- `{actor}` — `{count}` event(s)")
+
+        lines.extend(["", "**Main categories:**"])
+
+        for category, count in categories[:8]:
+            lines.append(f"- `{category}` — `{count}` event(s)")
+
+        lines.extend(["", "**Main actions:**"])
+
+        for action, count in actions[:8]:
+            lines.append(f"- `{action}` — `{count}` event(s)")
+
+        lines.extend(["", "**Recommended next actions:**"])
+
+        for rec in self.b4mega_recommendations_for_events(events)[:10]:
+            lines.append(f"- {rec}")
+
+        await self.send_paginated(ctx, "Executive Log Summary", lines)
+
+    @logs.command(name="runbook")
+    async def logs_runbook(self, ctx, *, query: str):
+        """Show the response runbook for a log query/event."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+        if not base:
+            await ctx.send(embed=info_embed("Investigation Runbook", f"No event matched `{query}`."))
+            return
+
+        packet_events = [base] + related
+        lines = [
+            f"**Runbook for `{query}`**",
+            "",
+        ]
+
+        lines.extend(self.b4mega_runbook_for_events(packet_events))
+
+        await self.send_paginated(ctx, "Investigation Runbook", lines)
+
+    @logs.command(name="recommendations")
+    async def logs_recommendations(self, ctx):
+        """Show recommendations for the current high-risk audit feed."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        if not events:
+            await ctx.send(embed=ok_embed("Log Recommendations", "No high-risk audit events returned by the API."))
+            return
+
+        lines = [
+            f"Events analysed: `{len(events)}`",
+            "",
+            "**Recommended actions:**",
+        ]
+
+        for rec in self.b4mega_recommendations_for_events(events):
+            lines.append(f"- {rec}")
+
+        await self.send_paginated(ctx, "Log Recommendations", lines)
+
+    @logs.command(name="checklist")
+    async def logs_checklist(self, ctx, *, query: str):
+        """Create a practical investigation checklist for a log query/event."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+        if not base:
+            await ctx.send(embed=info_embed("Investigation Checklist", f"No event matched `{query}`."))
+            return
+
+        packet_events = [base] + related
+        areas = self.b4mega_affected_areas(packet_events)
+
+        checks = [
+            "Confirm actor is expected and authorised.",
+            "Confirm this was planned work, migration, setup, or rotation.",
+            "Confirm there is no customer impact.",
+            "Confirm no secret values were exposed in Discord, GitHub, screenshots, or logs.",
+            "Add a timeline note to the alert.",
+        ]
+
+        if "Billing / Stripe" in areas:
+            checks.extend([
+                "Check Stripe webhook signing and delivery.",
+                "Check recent invoice/subscription events.",
+                "Confirm customer access was not disrupted by billing config changes.",
+            ])
+
+        if "Roblox Integration" in areas:
+            checks.extend([
+                "Test Roblox OAuth/login/verification.",
+                "Test Roblox Open Cloud/API integration.",
+                "Confirm Roblox webhook signing still validates.",
+            ])
+
+        if "Discord OAuth / Bot Integration" in areas:
+            checks.extend([
+                "Test Discord OAuth login.",
+                "Confirm Discord bot command health.",
+                "Confirm Discord callback URL and client secret are correct.",
+            ])
+
+        lines = [
+            f"**Checklist for `{query}`**",
+            "",
+            f"Affected areas: `{', '.join(areas)}`",
+            "",
+        ]
+
+        for idx, check in enumerate(checks, start=1):
+            lines.append(f"{idx}. ☐ {check}")
+
+        await self.send_paginated(ctx, "Investigation Checklist", lines)
+
+    @logs.command(name="affected")
+    async def logs_affected(self, ctx, *, query: str = ""):
+        """Show affected areas for a query, or the whole high-risk feed."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        selected = events
+
+        if query:
+            base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+            if not base:
+                await ctx.send(embed=info_embed("Affected Areas", f"No event matched `{query}`."))
+                return
+
+            selected = [base] + related
+
+        areas = self.b4mega_affected_areas(selected)
+        classification = self.b4mega_incident_classification(selected)
+
+        lines = [
+            f"Query: `{query or 'all high-risk events'}`",
+            f"Events analysed: `{len(selected)}`",
+            f"Overall severity: `{classification['severity'].title()}`",
+            "",
+            "**Affected areas:**",
+        ]
+
+        for area in areas:
+            lines.append(f"- `{area}`")
+
+        lines.extend([
+            "",
+            f"Customer impact: {classification['customer_impact']}",
+            f"Internal impact: {classification['internal_impact']}",
+        ])
+
+        await self.send_paginated(ctx, "Affected Areas", lines)
+
+    @logs.command(name="report")
+    async def logs_report(self, ctx, *, query: str):
+        """Show a full investigation report in Discord."""
+        if not await require_admin(ctx):
+            return
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+        if not base:
+            await ctx.send(embed=info_embed("Investigation Report", f"No event matched `{query}`."))
+            return
+
+        report = self.b4mega_report_text(base, related, query)
+        chunks = report.splitlines()
+
+        await self.send_paginated(ctx, "Investigation Report", chunks)
+
+    @logs.command(name="export")
+    async def logs_export(self, ctx, *, query: str):
+        """Export an investigation report as a text file."""
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        data = await self.b4a_fetch_highrisk_events(ctx.guild)
+        events = data.get("events") or []
+
+        base, related = self.b4mega_get_related_events(events, query, limit=20)
+
+        if not base:
+            await ctx.send(embed=info_embed("Investigation Export", f"No event matched `{query}`."))
+            return
+
+        report = self.b4mega_report_text(base, related, query)
+        safe_name = "".join(ch for ch in str(query).lower() if ch.isalnum() or ch in ["-", "_"])[:40] or "investigation"
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("Investigation report exported", f"Exported report for `{query}`."),
+            file=discord.File(fp, filename=f"mattis-investigation-{safe_name}.txt")
+        )
 
     @logs.command(name="correlate")
     async def logs_correlate(self, ctx, *, query: str):
