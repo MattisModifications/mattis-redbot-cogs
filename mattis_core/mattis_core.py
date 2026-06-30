@@ -22,6 +22,65 @@ from .shared_mattis import (
 
 
 
+
+# ============================================================
+# Mattis embed fallback helpers
+# Ensures info_embed / ok_embed / error_embed are always defined.
+# ============================================================
+
+try:
+    import discord
+except Exception:
+    discord = None
+
+
+def _mattis_basic_embed(title, description=None, colour=None):
+    if discord is None:
+        return None
+
+    try:
+        embed = discord.Embed(
+            title=str(title or "Mattis CMS"),
+            description=str(description or ""),
+            colour=colour,
+        )
+        return embed
+    except Exception:
+        return discord.Embed(
+            title=str(title or "Mattis CMS"),
+            description=str(description or ""),
+        )
+
+
+if "info_embed" not in globals():
+    def info_embed(title, description=None):
+        colour = None
+        try:
+            colour = discord.Colour.blurple() if discord else None
+        except Exception:
+            colour = None
+        return _mattis_basic_embed(title, description, colour)
+
+
+if "ok_embed" not in globals():
+    def ok_embed(title, description=None):
+        colour = None
+        try:
+            colour = discord.Colour.green() if discord else None
+        except Exception:
+            colour = None
+        return _mattis_basic_embed(title, description, colour)
+
+
+if "error_embed" not in globals():
+    def error_embed(title, description=None):
+        colour = None
+        try:
+            colour = discord.Colour.red() if discord else None
+        except Exception:
+            colour = None
+        return _mattis_basic_embed(title, description, colour)
+
 class PagedEmbedView(discord.ui.View):
     def __init__(self, ctx, *, title: str, pages: list[str], color: discord.Color | None = None, timeout: int = 180):
         super().__init__(timeout=timeout)
