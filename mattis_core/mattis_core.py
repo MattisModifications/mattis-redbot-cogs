@@ -2677,6 +2677,7 @@ class MattisCore(commands.Cog):
 
         return counts
 
+
     def b45_plan_alias(self, plan):
         p = str(plan or "all").lower().strip()
         p = p.replace("_", "-")
@@ -2691,13 +2692,24 @@ class MattisCore(commands.Cog):
             "ops": "b19-b31",
             "final": "b32-b44",
             "b31-b44": "b31-b44",
+
+            # Preserve original QA intentions as first-class plans.
+            "qa": "quality",
+            "quality": "quality",
+            "regression": "quality",
+            "post-batch": "quality",
+            "postbatch": "quality",
+            "smoke": "quality",
         }
 
         return aliases.get(p, p)
 
+
     def b45_available_plans(self):
         return {
             "all": "Runs every QA check across B1-B44 plus cogs/command registration.",
+            "quality": "Original QA purpose: regression, command health, state health, production quality and post-batch checks.",
+            "regression": "Alias of quality. Confirms new changes did not break older systems.",
             "cogs": "Checks core cogs/command groups are loaded and registered.",
             "b1-b10": "Core routing, doctor, prod readiness, alerts/logs, incidents, ops/governance.",
             "b11-b18": "Contracts, backups, releases, evidence, service catalogue, monitoring, comms, changelog.",
@@ -2711,11 +2723,15 @@ class MattisCore(commands.Cog):
             "evidence": "Release/incident evidence, evidence vault, packs, exports.",
         }
 
+
     def b45_plan_areas(self, plan):
         plan = self.b45_plan_alias(plan)
 
         if plan == "all":
             return ["cogs", "b1-b10", "b11-b18", "b19-b31", "b32-b44"]
+
+        if plan == "quality":
+            return ["cogs", "prod", "contracts", "backup", "monitoring", "quality", "healthmatrix", "board", "finalops"]
 
         if plan == "b31-b44":
             return ["board", "b32-b44"]
@@ -3373,6 +3389,7 @@ class MattisCore(commands.Cog):
         return None, None, state
 
     @mcore.group(name="qa", invoke_without_command=True)
+
     async def qa(self, ctx):
         """Master QA runner."""
         if not await require_admin(ctx):
@@ -3381,6 +3398,20 @@ class MattisCore(commands.Cog):
         lines = [
             "**Master QA Runner / Full Batch Test Harness**",
             "",
+            "**Original QA purpose still included:**",
+            "- quality assurance",
+            "- regression checking",
+            "- production readiness validation",
+            "- old-batch and new-batch compatibility checks",
+            "- command/helper/state validation",
+            "- clear PASS / WARN / FAIL output",
+            "- exact fix guidance when something breaks",
+            "",
+            "**Automation addition:**",
+            "Instead of manually typing 40+ checks after every batch, this runner performs the checks safely and exports one report.",
+            "",
+            "`!mcore qa purpose` — show QA purpose/intention",
+            "`!mcore qa checklist` — QA checklist",
             "`!mcore qa plans` — list available QA plans",
             "`!mcore qa dryrun <plan>` — preview what will be tested",
             "`!mcore qa run <plan>` — run QA plan",
@@ -3390,14 +3421,79 @@ class MattisCore(commands.Cog):
             "",
             "**Main commands:**",
             "`!mcore qa run all`",
+            "`!mcore qa run quality`",
+            "`!mcore qa run regression`",
             "`!mcore qa run b31-b44`",
-            "`!mcore qa run b32-b44`",
             "`!mcore qa run production`",
             "`!mcore qa run security`",
             "`!mcore qa run launch`",
         ]
 
         await self.send_paginated(ctx, "Master QA Runner", lines)
+
+
+    @qa.command(name="purpose")
+    async def qa_purpose(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**QA Purpose / Intentions**",
+            "",
+            "QA is not just a batch runner. Its original purpose is still:",
+            "",
+            "✅ Quality assurance",
+            "✅ Regression testing",
+            "✅ Command registration checks",
+            "✅ Helper/state validation",
+            "✅ API contract checks",
+            "✅ Production readiness checks",
+            "✅ Backup/release/evidence checks",
+            "✅ Security/config/integration checks",
+            "✅ Launch/finalops checks",
+            "✅ Clear fix guidance when something fails",
+            "",
+            "**The new addition:**",
+            "You now run one command instead of manually running 40+ checks after every batch.",
+            "",
+            "Use:",
+            "`!mcore qa run quality`",
+            "`!mcore qa run regression`",
+            "`!mcore qa run all`",
+        ]
+
+        await self.send_paginated(ctx, "QA Purpose", lines)
+
+    @qa.command(name="checklist")
+    async def qa_checklist(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**QA Checklist**",
+            "",
+            "☐ All expected command groups are registered.",
+            "☐ Core helpers exist.",
+            "☐ API contracts pass required checks.",
+            "☐ Backup readiness has no blockers.",
+            "☐ Critical monitors are passing or deliberately expected.",
+            "☐ No critical/high incidents are blocking release.",
+            "☐ Security posture has no hard blockers.",
+            "☐ Config/env verification gaps are visible.",
+            "☐ Webhook/OAuth verification gaps are visible.",
+            "☐ Stateful systems can write/read test records.",
+            "☐ Board/finalops reports build without errors.",
+            "☐ Full QA export gives exact fixes for any fail/warn.",
+        ]
+
+        await self.send_paginated(ctx, "QA Checklist", lines)
+
+    @qa.command(name="regression")
+    async def qa_regression(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        await self.qa_run(ctx, plan="quality")
 
     @qa.command(name="plans")
     async def qa_plans(self, ctx):
