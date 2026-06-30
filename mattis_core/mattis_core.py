@@ -3007,29 +3007,45 @@ class MattisCore(commands.Cog):
 
         return out
 
+
     async def b45_test_cogs(self, guild):
         results = []
-        loaded = [str(x).lower() for x in getattr(self.bot, "cogs", {}).keys()]
 
-        expected_names = [
-            "mattiscore",
-            "mattisstatus",
-            "mattissupport",
-            "mattisbilling",
-            "mattiscrm",
-            "mattisaudit",
-            "mattissecurity",
-            "mattiscommand",
-            "mattisworkspace",
-            "mattisverify",
-            "mattisrolesync",
+        raw_cogs = getattr(self.bot, "cogs", {}) or {}
+        loaded = [str(x).lower().replace("_", "") for x in raw_cogs.keys()]
+
+        expected = [
+            ("mattiscore", ["mattiscore", "mattis_core"], ["mcore"]),
+            ("mattisstatus", ["mattisstatus", "mattis_status"], []),
+            ("mattissupport", ["mattissupport", "mattis_support"], []),
+            ("mattisbilling", ["mattisbilling", "mattis_billing"], []),
+            ("mattiscrm", ["mattiscrm", "mattis_crm"], []),
+            ("mattisaudit", ["mattisaudit", "mattis_audit"], []),
+            ("mattissecurity", ["mattissecurity", "mattis_security"], []),
+
+            # Command was previously called Office in older batches, so detect both.
+            ("mattiscommand", ["mattiscommand", "mattis_command", "mattisoffice", "mattis_office", "command"], ["mcommand", "moffice"]),
+
+            ("mattisworkspace", ["mattisworkspace", "mattis_workspace"], []),
+            ("mattisverify", ["mattisverify", "mattis_verify"], []),
+            ("mattisrolesync", ["mattisrolesync", "mattis_rolesync"], []),
         ]
 
-        for name in expected_names:
-            if any(name in x.replace("_", "") for x in loaded):
-                results.append(self.b45_result("PASS", "cogs", name, "Cog appears loaded."))
+        for display, aliases, command_aliases in expected:
+            alias_hit = any(alias.lower().replace("_", "") in loaded for alias in aliases)
+            command_hit = any(self.bot.get_command(cmd) is not None for cmd in command_aliases)
+
+            if alias_hit or command_hit:
+                method = "cog alias" if alias_hit else "legacy command alias"
+                results.append(self.b45_result("PASS", "cogs", display, f"Cog appears loaded/detected via {method}."))
             else:
-                results.append(self.b45_result("WARN", "cogs", name, "Cog was not clearly detected in bot.cogs.", "Run `!cogs` or Redbot cog list. Load the cog if it is expected for production."))
+                results.append(self.b45_result(
+                    "WARN",
+                    "cogs",
+                    display,
+                    "Cog was not clearly detected in bot.cogs.",
+                    "Run `!cogs` or Redbot cog list. Load the cog only if it is expected for production."
+                ))
 
         results.extend(self.b45_check_command_groups("all"))
         return results
@@ -3080,28 +3096,83 @@ class MattisCore(commands.Cog):
 
         return results
 
+
     async def b45_test_b11_b18(self, guild):
         results = []
         results.extend(self.b45_check_command_groups("b11-b18"))
 
         if hasattr(self, "b11_check_contracts"):
-            contracts = await self.b45_safe_call(results, "contract", "check API contracts", lambda: self.b11_check_contracts(guild), "API contract checks completed.")
+            contracts = await self.b45_safe_call(
+                results,
+                "contract",
+                "check API contracts",
+                lambda: self.b11_check_contracts(guild),
+                "API contract checks completed."
+            )
+
             if contracts is not None and hasattr(self, "b11_contract_summary"):
                 summary = self.b11_contract_summary(contracts)
-                if summary.get("required_failed", 0):
-                    results.append(self.b45_result("FAIL", "contract", "required contracts", f"{summary.get('required_failed')} required contract(s) failed.", "Run `!mcore contract drift` and fix failed API routes."))
+                required_failed = int(summary.get("required_failed", 0) or 0)
+                optional_missing = int(summary.get("optional_missing", 0) or 0)
+
+                if required_failed:
+                    results.append(self.b45_result(
+                        "FAIL",
+                        "contract",
+                        "required contracts",
+                        f"{required_failed} required contract(s) failed.",
+                        "Run `!mcore contract drift` and fix failed API routes."
+                    ))
                 else:
-                    results.append(self.b45_result("PASS", "contract", "required contracts", "No required contract failures."))
-                if summary.get("optional_missing", 0):
-                    results.append(self.b45_result("WARN", "contract", "optional routes", f"{summary.get('optional_missing')} optional route(s) missing.", "Implement optional routes later or ignore if deliberately not needed."))
+                    results.append(self.b45_result(
+                        "PASS",
+                        "contract",
+                        "required contracts",
+                        "No required contract failures."
+                    ))
+
+                if optional_missing:
+                    results.append(self.b45_result(
+                        "PASS",
+                        "contract",
+                        "optional routes",
+                        f"{optional_missing} optional route(s) are missing, but optional routes do not block QA.",
+                        "No fix required unless you deliberately want those optional endpoints implemented."
+                    ))
+                else:
+                    results.append(self.b45_result(
+                        "PASS",
+                        "contract",
+                        "optional routes",
+                        "No optional routes missing."
+                    ))
 
         if hasattr(self, "b12_backup_readiness"):
-            backup = await self.b45_safe_call(results, "backup", "backup readiness", lambda: self.b12_backup_readiness(guild), "Backup readiness returned data.")
+            backup = await self.b45_safe_call(
+                results,
+                "backup",
+                "backup readiness",
+                lambda: self.b12_backup_readiness(guild),
+                "Backup readiness returned data."
+            )
+
             readiness = ((backup or {}).get("readiness") or {}) if backup else {}
+
             if readiness.get("blockers"):
-                results.append(self.b45_result("FAIL", "backup", "backup blockers", "; ".join(readiness.get("blockers")[:5]), "Run backup verification/restore test and sign-offs."))
+                results.append(self.b45_result(
+                    "FAIL",
+                    "backup",
+                    "backup blockers",
+                    "; ".join(readiness.get("blockers")[:5]),
+                    "Run backup verification/restore test and sign-offs."
+                ))
             elif readiness:
-                results.append(self.b45_result("PASS", "backup", "backup blockers", "No backup blockers."))
+                results.append(self.b45_result(
+                    "PASS",
+                    "backup",
+                    "backup blockers",
+                    "No backup blockers."
+                ))
 
         state_helpers = [
             ("release", "b13_get_release_state"),
@@ -3114,21 +3185,58 @@ class MattisCore(commands.Cog):
 
         for area, helper in state_helpers:
             if hasattr(self, helper):
-                await self.b45_safe_call(results, area, f"read {area} state", lambda h=helper: getattr(self, h)(guild), f"{area} state readable.")
+                await self.b45_safe_call(
+                    results,
+                    area,
+                    f"read {area} state",
+                    lambda h=helper: getattr(self, h)(guild),
+                    f"{area} state readable."
+                )
             else:
-                results.append(self.b45_result("FAIL", area, helper, "State helper missing.", f"Re-run the batch that introduced `{area}`."))
+                results.append(self.b45_result(
+                    "FAIL",
+                    area,
+                    helper,
+                    "State helper missing.",
+                    f"Re-run the batch that introduced `{area}`."
+                ))
 
         if hasattr(self, "b16_run_monitors"):
-            monitor_results = await self.b45_safe_call(results, "monitor", "run monitors", lambda: self.b16_run_monitors(guild, "all"), "Monitor run completed.")
+            monitor_results = await self.b45_safe_call(
+                results,
+                "monitor",
+                "run monitors",
+                lambda: self.b16_run_monitors(guild, "all"),
+                "Monitor run completed."
+            )
+
             if monitor_results:
                 failed = [x for x in monitor_results if not x.get("ok") and not x.get("silenced")]
                 critical = [x for x in failed if x.get("critical")]
+
                 if critical:
-                    results.append(self.b45_result("FAIL", "monitor", "critical monitor failures", f"{len(critical)} critical monitor(s) failed.", "Run `!mcore monitor status`; fix endpoint or set expected status deliberately."))
+                    results.append(self.b45_result(
+                        "FAIL",
+                        "monitor",
+                        "critical monitor failures",
+                        f"{len(critical)} critical monitor(s) failed.",
+                        "Run `!mcore monitor status`; fix endpoint or set expected status deliberately."
+                    ))
                 elif failed:
-                    results.append(self.b45_result("WARN", "monitor", "non-critical monitor failures", f"{len(failed)} non-critical monitor(s) failed.", "Review `!mcore monitor status`."))
+                    results.append(self.b45_result(
+                        "WARN",
+                        "monitor",
+                        "non-critical monitor failures",
+                        f"{len(failed)} non-critical monitor(s) failed.",
+                        "Review `!mcore monitor status`."
+                    ))
                 else:
-                    results.append(self.b45_result("PASS", "monitor", "monitor failures", "No unsilenced monitor failures."))
+                    results.append(self.b45_result(
+                        "PASS",
+                        "monitor",
+                        "monitor failures",
+                        "No unsilenced monitor failures."
+                    ))
 
         return results
 
