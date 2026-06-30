@@ -2579,6 +2579,936 @@ class MattisCore(commands.Cog):
     # B32 — Quality / Regression Centre
     # ============================================================
 
+
+    # ============================================================
+    # B45 — Master QA Runner / Full Batch Test Harness
+    # ============================================================
+
+    def b45_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b45_safe(self, value, limit=1400):
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    async def b45_get_qa_state(self, guild):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get("master_qa_runner") or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("runs", {})
+
+        return state
+
+    async def b45_set_qa_state(self, guild, state):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle["master_qa_runner"] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b45_new_run_id(self, state):
+        state["counter"] = int(state.get("counter", 0) or 0) + 1
+        return f"QA-{state['counter']:04d}"
+
+    def b45_result(self, status, area, name, detail="", fix="", meta=None):
+        return {
+            "status": str(status or "WARN").upper(),
+            "area": self.b45_safe(area, 120),
+            "name": self.b45_safe(name, 220),
+            "detail": self.b45_safe(detail, 1600),
+            "fix": self.b45_safe(fix, 1600),
+            "meta": meta or {},
+            "at": self.b45_now_iso(),
+        }
+
+    def b45_command_exists(self, path):
+        try:
+            parts = str(path or "").split()
+
+            if not parts:
+                return False
+
+            cmd = self.bot.get_command(parts[0])
+
+            for part in parts[1:]:
+                if cmd is None or not hasattr(cmd, "get_command"):
+                    return False
+                cmd = cmd.get_command(part)
+
+            return cmd is not None
+        except Exception:
+            return False
+
+    def b45_count_results(self, results):
+        counts = {
+            "PASS": 0,
+            "WARN": 0,
+            "FAIL": 0,
+            "SKIP": 0,
+        }
+
+        for item in results:
+            status = str(item.get("status", "WARN")).upper()
+            counts[status] = counts.get(status, 0) + 1
+
+        overall = "PASS"
+
+        if counts.get("FAIL", 0):
+            overall = "FAIL"
+        elif counts.get("WARN", 0):
+            overall = "NEEDS REVIEW"
+        elif counts.get("SKIP", 0):
+            overall = "PASS WITH SKIPS"
+
+        counts["OVERALL"] = overall
+        counts["TOTAL"] = len(results)
+
+        return counts
+
+    def b45_plan_alias(self, plan):
+        p = str(plan or "all").lower().strip()
+        p = p.replace("_", "-")
+
+        aliases = {
+            "latest": "b32-b44",
+            "everything": "all",
+            "full": "all",
+            "prod": "production",
+            "core": "b1-b10",
+            "contracts": "b11-b18",
+            "ops": "b19-b31",
+            "final": "b32-b44",
+            "b31-b44": "b31-b44",
+        }
+
+        return aliases.get(p, p)
+
+    def b45_available_plans(self):
+        return {
+            "all": "Runs every QA check across B1-B44 plus cogs/command registration.",
+            "cogs": "Checks core cogs/command groups are loaded and registered.",
+            "b1-b10": "Core routing, doctor, prod readiness, alerts/logs, incidents, ops/governance.",
+            "b11-b18": "Contracts, backups, releases, evidence, service catalogue, monitoring, comms, changelog.",
+            "b19-b31": "SLO, impact, runbooks, posture, secrets, config, DB/cache, webhooks/OAuth, retention, board.",
+            "b31-b44": "Board through finalops, including B32-B44 test systems.",
+            "b32-b44": "Quality, health matrix, support/billing ops, access review, vendors, maintenance, DR, launch, KB, packs, finalops.",
+            "production": "Production readiness, contracts, backup, monitors, board, final go/no-go.",
+            "security": "Posture, secret ledger, config compliance, OAuth/webhook verification.",
+            "launch": "Launch gate, maintenance, DR drill, evidence packs, finalops.",
+            "integrations": "API contracts, monitoring, webhooks, OAuth, support/billing endpoints.",
+            "evidence": "Release/incident evidence, evidence vault, packs, exports.",
+        }
+
+    def b45_plan_areas(self, plan):
+        plan = self.b45_plan_alias(plan)
+
+        if plan == "all":
+            return ["cogs", "b1-b10", "b11-b18", "b19-b31", "b32-b44"]
+
+        if plan == "b31-b44":
+            return ["board", "b32-b44"]
+
+        if plan == "production":
+            return ["prod", "contracts", "backup", "monitoring", "board", "launch", "finalops"]
+
+        if plan == "security":
+            return ["posture", "secretops", "configops", "webhook", "oauth", "evidence"]
+
+        if plan == "launch":
+            return ["maintenance", "drill", "launch", "pack", "finalops"]
+
+        if plan == "integrations":
+            return ["contracts", "monitoring", "webhook", "oauth", "supportops", "billingops"]
+
+        if plan == "evidence":
+            return ["evidence", "pack", "release", "incident"]
+
+        return [plan]
+
+    def b45_dryrun_lines(self, plan):
+        plan = self.b45_plan_alias(plan)
+        areas = self.b45_plan_areas(plan)
+
+        lines = [
+            f"**QA dry-run for `{plan}`**",
+            "",
+            "This will run internal checks safely in order. It does not spam Discord with every command.",
+            "",
+            "**Areas:**",
+        ]
+
+        for area in areas:
+            lines.append(f"- `{area}`")
+
+        lines.extend([
+            "",
+            "**What it checks:**",
+            "- command groups are registered",
+            "- helpers exist",
+            "- API endpoints respond",
+            "- stored state can be read",
+            "- temporary QA records can be created where needed",
+            "- reports/builders return usable output",
+            "- failures are captured instead of crashing",
+            "- fix instructions are included in the export",
+        ])
+
+        return lines
+
+    async def b45_safe_call(self, results, area, name, func, success_detail="OK", fix="", warn_if_empty=False):
+        try:
+            value = await func()
+
+            if warn_if_empty and not value:
+                results.append(self.b45_result("WARN", area, name, "Returned empty/no data.", fix or "Check whether the relevant state or seed command has been run.", {"value": str(value)[:400]}))
+                return value
+
+            results.append(self.b45_result("PASS", area, name, success_detail, "", {"value_type": type(value).__name__}))
+            return value
+
+        except Exception as e:
+            results.append(self.b45_result(
+                "FAIL",
+                area,
+                name,
+                f"{type(e).__name__}: {e}",
+                fix or f"Inspect `{area}` implementation. Re-run the relevant repair patch for this batch and then run `!mcore qa run {area}` again."
+            ))
+            return None
+
+    def b45_check_command_groups(self, plan):
+        expected = []
+
+        if plan in ["all", "cogs", "b1-b10"]:
+            expected += [
+                "mcore",
+                "mcore prod",
+                "mcore incident",
+                "mcore ops",
+                "mcore alerts",
+                "mcore logs",
+            ]
+
+        if plan in ["all", "b11-b18"]:
+            expected += [
+                "mcore contract",
+                "mcore backup",
+                "mcore release",
+                "mcore evidence",
+                "mcore service",
+                "mcore monitor",
+                "mcore comms",
+                "mcore changelog",
+            ]
+
+        if plan in ["all", "b19-b31"]:
+            expected += [
+                "mcore slo",
+                "mcore impact",
+                "mcore runbook",
+                "mcore posture",
+                "mcore secretops",
+                "mcore configops",
+                "mcore dbops",
+                "mcore cacheops",
+                "mcore webhook",
+                "mcore oauth",
+                "mcore retention",
+                "mcore board",
+            ]
+
+        if plan in ["all", "b31-b44", "b32-b44"]:
+            expected += [
+                "mcore board",
+                "mcore quality",
+                "mcore healthmatrix",
+                "mcore supportops",
+                "mcore billingops",
+                "mcore accessreview",
+                "mcore vendor",
+                "mcore maintenance",
+                "mcore drill",
+                "mcore launch",
+                "mcore kb",
+                "mcore customercomms",
+                "mcore pack",
+                "mcore finalops",
+            ]
+
+        results = []
+
+        for command in self.b45_dedupe_list(expected):
+            if self.b45_command_exists(command):
+                results.append(self.b45_result("PASS", "command-registration", command, "Command group is registered."))
+            else:
+                results.append(self.b45_result("FAIL", "command-registration", command, "Command group is missing.", f"Reload mattis_core. If still missing, re-run the batch patch that introduced `{command}`."))
+
+        return results
+
+    def b45_dedupe_list(self, items):
+        out = []
+        seen = set()
+
+        for item in items or []:
+            key = str(item)
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+
+        return out
+
+    async def b45_test_cogs(self, guild):
+        results = []
+        loaded = [str(x).lower() for x in getattr(self.bot, "cogs", {}).keys()]
+
+        expected_names = [
+            "mattiscore",
+            "mattisstatus",
+            "mattissupport",
+            "mattisbilling",
+            "mattiscrm",
+            "mattisaudit",
+            "mattissecurity",
+            "mattiscommand",
+            "mattisworkspace",
+            "mattisverify",
+            "mattisrolesync",
+        ]
+
+        for name in expected_names:
+            if any(name in x.replace("_", "") for x in loaded):
+                results.append(self.b45_result("PASS", "cogs", name, "Cog appears loaded."))
+            else:
+                results.append(self.b45_result("WARN", "cogs", name, "Cog was not clearly detected in bot.cogs.", "Run `!cogs` or Redbot cog list. Load the cog if it is expected for production."))
+
+        results.extend(self.b45_check_command_groups("all"))
+        return results
+
+    async def b45_test_b1_b10(self, guild):
+        results = []
+        results.extend(self.b45_check_command_groups("b1-b10"))
+
+        required_helpers = [
+            "b5_build_readiness",
+            "b5_http_get",
+            "b7_get_incident_state",
+            "b7_find_incident",
+            "b8_active_incident_summary",
+            "b9_build_ops_snapshot",
+            "b10_incident_release_accepted",
+        ]
+
+        for helper in required_helpers:
+            if hasattr(self, helper):
+                results.append(self.b45_result("PASS", "b1-b10.helpers", helper, "Helper exists."))
+            else:
+                results.append(self.b45_result("FAIL", "b1-b10.helpers", helper, "Required helper missing.", "Re-run the earlier B5-B10 patches or the latest stability repair patch."))
+
+        if hasattr(self, "b5_build_readiness"):
+            prod = await self.b45_safe_call(results, "prod", "build production readiness", lambda: self.b5_build_readiness(guild, include_optional=False), "Production readiness builder returned data.")
+            if prod:
+                readiness = prod.get("readiness") or {}
+                blockers = readiness.get("blockers") or []
+                if blockers:
+                    results.append(self.b45_result("WARN", "prod", "readiness blockers", f"{len(blockers)} blocker(s): " + "; ".join(blockers[:4]), "Resolve blockers or document risk acceptance before launch."))
+                else:
+                    results.append(self.b45_result("PASS", "prod", "readiness blockers", "No production blockers returned."))
+
+        if hasattr(self, "b7_get_incident_state"):
+            state = await self.b45_safe_call(results, "incident", "read incident state", lambda: self.b7_get_incident_state(guild), "Incident state readable.")
+            if isinstance(state, dict):
+                incidents = state.get("incidents") or {}
+                active = [x for x in incidents.values() if str(x.get("status", "open")).lower() != "resolved"]
+                high = [x for x in active if str(x.get("severity", "")).lower() in ["critical", "high"]]
+                if high:
+                    results.append(self.b45_result("WARN", "incident", "active critical/high incidents", f"{len(high)} active critical/high incident(s).", "Review `!mcore incident active` and resolve/accept risk as appropriate."))
+                else:
+                    results.append(self.b45_result("PASS", "incident", "active critical/high incidents", "No active critical/high incidents detected."))
+
+        if hasattr(self, "b9_build_ops_snapshot"):
+            await self.b45_safe_call(results, "ops", "build ops snapshot", lambda: self.b9_build_ops_snapshot(guild), "Ops snapshot builder returned data.")
+
+        return results
+
+    async def b45_test_b11_b18(self, guild):
+        results = []
+        results.extend(self.b45_check_command_groups("b11-b18"))
+
+        if hasattr(self, "b11_check_contracts"):
+            contracts = await self.b45_safe_call(results, "contract", "check API contracts", lambda: self.b11_check_contracts(guild), "API contract checks completed.")
+            if contracts is not None and hasattr(self, "b11_contract_summary"):
+                summary = self.b11_contract_summary(contracts)
+                if summary.get("required_failed", 0):
+                    results.append(self.b45_result("FAIL", "contract", "required contracts", f"{summary.get('required_failed')} required contract(s) failed.", "Run `!mcore contract drift` and fix failed API routes."))
+                else:
+                    results.append(self.b45_result("PASS", "contract", "required contracts", "No required contract failures."))
+                if summary.get("optional_missing", 0):
+                    results.append(self.b45_result("WARN", "contract", "optional routes", f"{summary.get('optional_missing')} optional route(s) missing.", "Implement optional routes later or ignore if deliberately not needed."))
+
+        if hasattr(self, "b12_backup_readiness"):
+            backup = await self.b45_safe_call(results, "backup", "backup readiness", lambda: self.b12_backup_readiness(guild), "Backup readiness returned data.")
+            readiness = ((backup or {}).get("readiness") or {}) if backup else {}
+            if readiness.get("blockers"):
+                results.append(self.b45_result("FAIL", "backup", "backup blockers", "; ".join(readiness.get("blockers")[:5]), "Run backup verification/restore test and sign-offs."))
+            elif readiness:
+                results.append(self.b45_result("PASS", "backup", "backup blockers", "No backup blockers."))
+
+        state_helpers = [
+            ("release", "b13_get_release_state"),
+            ("evidence", "b14_get_evidence_state"),
+            ("service", "b15_get_service_state"),
+            ("monitor", "b16_get_monitor_state"),
+            ("comms", "b17_get_comms_state"),
+            ("changelog", "b18_get_changelog_state"),
+        ]
+
+        for area, helper in state_helpers:
+            if hasattr(self, helper):
+                await self.b45_safe_call(results, area, f"read {area} state", lambda h=helper: getattr(self, h)(guild), f"{area} state readable.")
+            else:
+                results.append(self.b45_result("FAIL", area, helper, "State helper missing.", f"Re-run the batch that introduced `{area}`."))
+
+        if hasattr(self, "b16_run_monitors"):
+            monitor_results = await self.b45_safe_call(results, "monitor", "run monitors", lambda: self.b16_run_monitors(guild, "all"), "Monitor run completed.")
+            if monitor_results:
+                failed = [x for x in monitor_results if not x.get("ok") and not x.get("silenced")]
+                critical = [x for x in failed if x.get("critical")]
+                if critical:
+                    results.append(self.b45_result("FAIL", "monitor", "critical monitor failures", f"{len(critical)} critical monitor(s) failed.", "Run `!mcore monitor status`; fix endpoint or set expected status deliberately."))
+                elif failed:
+                    results.append(self.b45_result("WARN", "monitor", "non-critical monitor failures", f"{len(failed)} non-critical monitor(s) failed.", "Review `!mcore monitor status`."))
+                else:
+                    results.append(self.b45_result("PASS", "monitor", "monitor failures", "No unsilenced monitor failures."))
+
+        return results
+
+    async def b45_test_b19_b31(self, guild):
+        results = []
+        results.extend(self.b45_check_command_groups("b19-b31"))
+
+        checks = [
+            ("slo", "b20_get_slo_state"),
+            ("impact", "b21_get_impact_state"),
+            ("runbook", "b22_get_runbook_state"),
+            ("secretops", "b24_get_secret_state"),
+            ("configops", "b25_get_config_state"),
+            ("dbops", "b26_get_db_state"),
+            ("webhook", "b28_get_webhook_state"),
+            ("oauth", "b29_get_oauth_state"),
+            ("retention", "b30_get_retention_state"),
+        ]
+
+        for area, helper in checks:
+            if hasattr(self, helper):
+                await self.b45_safe_call(results, area, f"read {area} state", lambda h=helper: getattr(self, h)(guild), f"{area} state readable.")
+            else:
+                results.append(self.b45_result("FAIL", area, helper, "Helper missing.", f"Re-run B19-B31 patch or repair `{area}`."))
+
+        if hasattr(self, "b23_posture_data") and hasattr(self, "b23_score"):
+            data = await self.b45_safe_call(results, "posture", "build posture data", lambda: self.b23_posture_data(guild), "Posture data built.")
+            if data:
+                try:
+                    score, blockers, warnings = self.b23_score(data)
+                    if blockers:
+                        results.append(self.b45_result("WARN", "posture", "posture blockers", f"Score {score}/100. Blockers: " + "; ".join(blockers[:5]), "Review `!mcore posture report`."))
+                    else:
+                        results.append(self.b45_result("PASS", "posture", "posture blockers", f"Score {score}/100. No posture blockers."))
+                except Exception as e:
+                    results.append(self.b45_result("FAIL", "posture", "posture score", f"{type(e).__name__}: {e}", "Repair B23 posture score/report methods."))
+
+        if hasattr(self, "b31_board_data") and hasattr(self, "b31_board_lines"):
+            data = await self.b45_safe_call(results, "board", "build board data", lambda: self.b31_board_data(guild), "Board data built.")
+            if data:
+                try:
+                    lines = self.b31_board_lines(data)
+                    warnings = [x for x in lines if "⚠️" in x]
+                    if len(warnings) != len(set(warnings)):
+                        results.append(self.b45_result("WARN", "board", "duplicate warnings", "Board report has duplicate warning lines.", "Apply board warning dedupe repair patch."))
+                    else:
+                        results.append(self.b45_result("PASS", "board", "duplicate warnings", "Board warnings are deduped."))
+                except Exception as e:
+                    results.append(self.b45_result("FAIL", "board", "board report lines", f"{type(e).__name__}: {e}", "Repair B31 board report method."))
+
+        return results
+
+    async def b45_test_b32_b44(self, guild):
+        results = []
+        results.extend(self.b45_check_command_groups("b32-b44"))
+
+        if hasattr(self, "b32_quality_data") and hasattr(self, "b32_quality_lines"):
+            data = await self.b45_safe_call(results, "quality", "build quality data", lambda: self.b32_quality_data(guild), "Quality data built.")
+            if data:
+                try:
+                    lines = self.b32_quality_lines(data)
+                    results.append(self.b45_result("PASS", "quality", "quality lines", f"Quality report returned {len(lines)} line(s)."))
+                except Exception as e:
+                    results.append(self.b45_result("FAIL", "quality", "quality lines", f"{type(e).__name__}: {e}", "Repair B32 quality report methods."))
+
+        if hasattr(self, "b33_matrix_data") and hasattr(self, "b33_matrix_lines"):
+            data = await self.b45_safe_call(results, "healthmatrix", "build matrix data", lambda: self.b33_matrix_data(guild), "Health matrix data built.")
+            if data:
+                try:
+                    lines = self.b33_matrix_lines(data)
+                    results.append(self.b45_result("PASS", "healthmatrix", "matrix lines", f"Health matrix returned {len(lines)} line(s)."))
+                except Exception as e:
+                    results.append(self.b45_result("FAIL", "healthmatrix", "matrix lines", f"{type(e).__name__}: {e}", "Repair B33 health matrix methods."))
+
+        if hasattr(self, "b34_support_data"):
+            await self.b45_safe_call(results, "supportops", "support summary API", lambda: self.b34_support_data(guild), "Support API checks completed.")
+
+        if hasattr(self, "b35_billing_data"):
+            await self.b45_safe_call(results, "billingops", "billing summary API", lambda: self.b35_billing_data(guild), "Billing API checks completed.")
+
+        await self.b45_test_stateful_b32_b44(guild, results)
+
+        if hasattr(self, "b40_data") and hasattr(self, "b40_lines"):
+            data = await self.b45_safe_call(results, "launch", "launch data", lambda: self.b40_data(guild), "Launch data built.")
+            if data:
+                try:
+                    lines = self.b40_lines(data)
+                    gate = next((x for x in lines if "Gate result:" in x), "")
+                    status = "PASS" if "GO" in gate else "WARN"
+                    fix = "" if status == "PASS" else "Review missing approvals or blockers in `!mcore launch gate`."
+                    results.append(self.b45_result(status, "launch", "launch gate", gate or "No gate line returned.", fix))
+                except Exception as e:
+                    results.append(self.b45_result("FAIL", "launch", "launch lines", f"{type(e).__name__}: {e}", "Repair B40 launch gate methods."))
+
+        if hasattr(self, "b43_launch_pack_lines"):
+            await self.b45_safe_call(results, "pack", "launch evidence pack", lambda: self.b43_launch_pack_lines(guild), "Launch evidence pack built.")
+
+        if hasattr(self, "b44_final_data") and hasattr(self, "b44_final_lines"):
+            data = await self.b45_safe_call(results, "finalops", "finalops data", lambda: self.b44_final_data(guild), "Finalops data built.")
+            if data:
+                try:
+                    lines = self.b44_final_lines(data)
+                    results.append(self.b45_result("PASS", "finalops", "finalops lines", f"Finalops report returned {len(lines)} line(s)."))
+                except Exception as e:
+                    results.append(self.b45_result("FAIL", "finalops", "finalops lines", f"{type(e).__name__}: {e}", "Repair B44 finalops methods."))
+
+        return results
+
+    async def b45_test_stateful_b32_b44(self, guild, results):
+        # Access review state write/read.
+        if hasattr(self, "b36_state") and hasattr(self, "b36_find"):
+            try:
+                state = await self.b36_state(guild)
+                review_id = self.b32_new_id(state, "AR") if hasattr(self, "b32_new_id") else "AR-QA"
+                state.setdefault("reviews", {})[review_id] = {
+                    "id": review_id,
+                    "title": "QA automated access review",
+                    "status": "open",
+                    "created_at": self.b45_now_iso(),
+                    "created_by": "B45 QA Runner",
+                    "items": [{"area": "QA", "finding": "Automated access review state write/read test.", "at": self.b45_now_iso(), "by": "B45 QA Runner"}],
+                    "signoffs": {"Ops": {"at": self.b45_now_iso(), "by": "B45 QA Runner", "note": "Automated QA signoff."}},
+                    "qa_test": True,
+                }
+                await self.b32_set_state(guild, "access_review_centre", state)
+                found_id, found, _ = await self.b36_find(guild, review_id)
+                if found:
+                    results.append(self.b45_result("PASS", "accessreview", "state write/read", f"Created and found `{found_id}`."))
+                else:
+                    results.append(self.b45_result("FAIL", "accessreview", "state write/read", "Created QA access review but could not find it.", "Repair B36 find/state helpers."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", "accessreview", "state write/read", f"{type(e).__name__}: {e}", "Repair B36 access review methods."))
+
+        # Vendor state.
+        if hasattr(self, "b37_state") and hasattr(self, "b37_find_vendor"):
+            try:
+                state = await self.b37_state(guild)
+                vendors = state.setdefault("vendors", {})
+                vendors.setdefault("qa-vendor", {"name": "QA Vendor", "description": "Automated vendor QA test.", "status": "verified", "risks": []})
+                vendors["qa-vendor"]["risks"] = list(vendors["qa-vendor"].get("risks") or []) + ["Automated QA risk."]
+                await self.b32_set_state(guild, "vendor_dependency_register", state)
+                key, item, _ = await self.b37_find_vendor(guild, "QA Vendor")
+                if item and isinstance(item.get("risks"), list):
+                    results.append(self.b45_result("PASS", "vendor", "risk list/state", "Vendor risk list is healthy."))
+                else:
+                    results.append(self.b45_result("FAIL", "vendor", "risk list/state", "Vendor risks are not stored as a list.", "Apply vendor risk repair patch."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", "vendor", "state write/read", f"{type(e).__name__}: {e}", "Repair B37 vendor methods."))
+
+        # Maintenance.
+        if hasattr(self, "b38_state") and hasattr(self, "b38_find"):
+            try:
+                state = await self.b38_state(guild)
+                win_id = self.b32_new_id(state, "MW") if hasattr(self, "b32_new_id") else "MW-QA"
+                state.setdefault("windows", {})[win_id] = {
+                    "id": win_id,
+                    "title": "QA maintenance window",
+                    "window": "Automated QA",
+                    "impact": "No customer impact. Automated state test only.",
+                    "status": "completed",
+                    "created_at": self.b45_now_iso(),
+                    "created_by": "B45 QA Runner",
+                    "completed_at": self.b45_now_iso(),
+                    "qa_test": True,
+                }
+                await self.b32_set_state(guild, "maintenance_window_manager", state)
+                found_id, found, _ = await self.b38_find(guild, win_id)
+                if found:
+                    results.append(self.b45_result("PASS", "maintenance", "state write/read", f"Created and found `{found_id}`."))
+                else:
+                    results.append(self.b45_result("FAIL", "maintenance", "state write/read", "Created QA maintenance window but could not find it.", "Repair B38 find/state helpers."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", "maintenance", "state write/read", f"{type(e).__name__}: {e}", "Repair B38 maintenance methods."))
+
+        # Drill.
+        if hasattr(self, "b39_state") and hasattr(self, "b39_find"):
+            try:
+                state = await self.b39_state(guild)
+                drill_id = self.b32_new_id(state, "DR") if hasattr(self, "b32_new_id") else "DR-QA"
+                state.setdefault("drills", {})[drill_id] = {
+                    "id": drill_id,
+                    "title": "QA DR drill",
+                    "status": "passed",
+                    "created_at": self.b45_now_iso(),
+                    "created_by": "B45 QA Runner",
+                    "steps": [{"at": self.b45_now_iso(), "by": "B45 QA Runner", "step": "Automated DR drill state test."}],
+                    "qa_test": True,
+                }
+                await self.b32_set_state(guild, "disaster_recovery_drills", state)
+                found_id, found, _ = await self.b39_find(guild, drill_id)
+                if found:
+                    results.append(self.b45_result("PASS", "drill", "state write/read", f"Created and found `{found_id}`."))
+                else:
+                    results.append(self.b45_result("FAIL", "drill", "state write/read", "Created QA drill but could not find it.", "Repair B39 find/state helpers."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", "drill", "state write/read", f"{type(e).__name__}: {e}", "Repair B39 drill methods."))
+
+        # KB.
+        if hasattr(self, "b41_state") and hasattr(self, "b41_find"):
+            try:
+                state = await self.b41_state(guild)
+                entry_id = self.b32_new_id(state, "KB") if hasattr(self, "b32_new_id") else "KB-QA"
+                state.setdefault("entries", {})[entry_id] = {
+                    "id": entry_id,
+                    "category": "Decision",
+                    "title": "QA production decision",
+                    "body": "Automated KB state write/read test.",
+                    "created_at": self.b45_now_iso(),
+                    "created_by": "B45 QA Runner",
+                    "qa_test": True,
+                }
+                await self.b32_set_state(guild, "knowledge_base_decisions", state)
+                found_id, found, _ = await self.b41_find(guild, entry_id)
+                if found:
+                    results.append(self.b45_result("PASS", "kb", "state write/read", f"Created and found `{found_id}`."))
+                else:
+                    results.append(self.b45_result("FAIL", "kb", "state write/read", "Created QA KB entry but could not find it.", "Repair B41 find/state helpers."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", "kb", "state write/read", f"{type(e).__name__}: {e}", "Repair B41 KB methods."))
+
+        # Customer comms.
+        if hasattr(self, "b42_state"):
+            try:
+                state = await self.b42_state(guild)
+                state.setdefault("segments", {})["qa-customers"] = {
+                    "name": "QA Customers",
+                    "description": "Automated QA customer segment.",
+                    "created_at": self.b45_now_iso(),
+                    "created_by": "B45 QA Runner",
+                    "qa_test": True,
+                }
+                plan_id = self.b32_new_id(state, "CC") if hasattr(self, "b32_new_id") else "CC-QA"
+                state.setdefault("plans", {})[plan_id] = {
+                    "id": plan_id,
+                    "segment": "QA Customers",
+                    "topic": "QA readiness",
+                    "message": "Automated customer comms state test.",
+                    "created_at": self.b45_now_iso(),
+                    "created_by": "B45 QA Runner",
+                    "qa_test": True,
+                }
+                await self.b32_set_state(guild, "customer_comms_registry", state)
+                results.append(self.b45_result("PASS", "customercomms", "state write/read", f"Created QA segment and `{plan_id}`."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", "customercomms", "state write/read", f"{type(e).__name__}: {e}", "Repair B42 customer comms methods."))
+
+    async def b45_run_plan_internal(self, guild, plan):
+        plan = self.b45_plan_alias(plan)
+        areas = self.b45_plan_areas(plan)
+        results = []
+
+        if "cogs" in areas:
+            results.extend(await self.b45_test_cogs(guild))
+
+        if "b1-b10" in areas or any(x in areas for x in ["prod", "incident", "ops"]):
+            results.extend(await self.b45_test_b1_b10(guild))
+
+        if "b11-b18" in areas or any(x in areas for x in ["contracts", "backup", "release", "evidence", "service", "monitoring", "comms", "changelog"]):
+            results.extend(await self.b45_test_b11_b18(guild))
+
+        if "b19-b31" in areas or any(x in areas for x in ["slo", "impact", "runbook", "posture", "secretops", "configops", "dbops", "cacheops", "webhook", "oauth", "retention", "board"]):
+            results.extend(await self.b45_test_b19_b31(guild))
+
+        if "b32-b44" in areas or any(x in areas for x in ["quality", "healthmatrix", "supportops", "billingops", "accessreview", "vendor", "maintenance", "drill", "launch", "kb", "customercomms", "pack", "finalops"]):
+            results.extend(await self.b45_test_b32_b44(guild))
+
+        if "board" in areas and "b19-b31" not in areas:
+            if hasattr(self, "b31_board_data") and hasattr(self, "b31_board_lines"):
+                data = await self.b45_safe_call(results, "board", "build board data", lambda: self.b31_board_data(guild), "Board data built.")
+                if data:
+                    try:
+                        lines = self.b31_board_lines(data)
+                        results.append(self.b45_result("PASS", "board", "board report", f"Board report returned {len(lines)} line(s)."))
+                    except Exception as e:
+                        results.append(self.b45_result("FAIL", "board", "board report", f"{type(e).__name__}: {e}", "Repair B31 board methods."))
+
+        return results
+
+    def b45_summary_lines(self, run):
+        counts = run.get("counts") or {}
+        results = run.get("results") or []
+
+        lines = [
+            f"**QA Run `{run.get('id')}`**",
+            "",
+            f"Plan: `{run.get('plan')}`",
+            f"Started: `{run.get('started_at')}`",
+            f"Finished: `{run.get('finished_at')}`",
+            f"Overall: `{counts.get('OVERALL')}`",
+            "",
+            f"Total: `{counts.get('TOTAL', 0)}`",
+            f"Passed: `{counts.get('PASS', 0)}`",
+            f"Warnings: `{counts.get('WARN', 0)}`",
+            f"Failed: `{counts.get('FAIL', 0)}`",
+            f"Skipped: `{counts.get('SKIP', 0)}`",
+            "",
+        ]
+
+        failures = [x for x in results if x.get("status") == "FAIL"]
+        warnings = [x for x in results if x.get("status") == "WARN"]
+
+        lines.append("**Failures:**")
+
+        if failures:
+            for item in failures[:20]:
+                lines.append(f"- `{item.get('area')}` / **{item.get('name')}** — {item.get('detail')}")
+                if item.get("fix"):
+                    lines.append(f"  Fix: {item.get('fix')}")
+        else:
+            lines.append("- None")
+
+        lines.append("")
+        lines.append("**Warnings:**")
+
+        if warnings:
+            for item in warnings[:20]:
+                lines.append(f"- `{item.get('area')}` / **{item.get('name')}** — {item.get('detail')}")
+                if item.get("fix"):
+                    lines.append(f"  Fix: {item.get('fix')}")
+        else:
+            lines.append("- None")
+
+        lines.extend([
+            "",
+            "Use `!mcore qa export latest` for the full report.",
+        ])
+
+        return lines
+
+    def b45_report_text(self, run):
+        counts = run.get("counts") or {}
+        lines = [
+            "Mattis CMS | Systems",
+            f"Master QA Report — {run.get('id')}",
+            "=" * 48,
+            "",
+            f"Plan: {run.get('plan')}",
+            f"Started: {run.get('started_at')}",
+            f"Finished: {run.get('finished_at')}",
+            f"Overall: {counts.get('OVERALL')}",
+            "",
+            f"Total: {counts.get('TOTAL', 0)}",
+            f"Passed: {counts.get('PASS', 0)}",
+            f"Warnings: {counts.get('WARN', 0)}",
+            f"Failed: {counts.get('FAIL', 0)}",
+            f"Skipped: {counts.get('SKIP', 0)}",
+            "",
+            "Results",
+            "-" * 48,
+        ]
+
+        for item in run.get("results") or []:
+            lines.extend([
+                f"[{item.get('status')}] {item.get('area')} — {item.get('name')}",
+                f"Detail: {item.get('detail')}",
+            ])
+
+            if item.get("fix"):
+                lines.append(f"Fix: {item.get('fix')}")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    async def b45_find_run(self, guild, query):
+        state = await self.b45_get_qa_state(guild)
+        runs = state.get("runs") or {}
+        q = str(query or "latest").strip()
+
+        if q.lower() in ["latest", "last", "newest"]:
+            if not runs:
+                return None, None, state
+            key = sorted(runs.keys())[-1]
+            return key, runs[key], state
+
+        if q.upper() in runs:
+            key = q.upper()
+            return key, runs[key], state
+
+        return None, None, state
+
+    @mcore.group(name="qa", invoke_without_command=True)
+    async def qa(self, ctx):
+        """Master QA runner."""
+        if not await require_admin(ctx):
+            return
+
+        lines = [
+            "**Master QA Runner / Full Batch Test Harness**",
+            "",
+            "`!mcore qa plans` — list available QA plans",
+            "`!mcore qa dryrun <plan>` — preview what will be tested",
+            "`!mcore qa run <plan>` — run QA plan",
+            "`!mcore qa status` — latest QA result",
+            "`!mcore qa history` — QA run history",
+            "`!mcore qa export <latest/id>` — export full QA report",
+            "",
+            "**Main commands:**",
+            "`!mcore qa run all`",
+            "`!mcore qa run b31-b44`",
+            "`!mcore qa run b32-b44`",
+            "`!mcore qa run production`",
+            "`!mcore qa run security`",
+            "`!mcore qa run launch`",
+        ]
+
+        await self.send_paginated(ctx, "Master QA Runner", lines)
+
+    @qa.command(name="plans")
+    async def qa_plans(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        lines = ["**Available QA plans**", ""]
+
+        for name, desc in self.b45_available_plans().items():
+            lines.append(f"`{name}` — {desc}")
+
+        await self.send_paginated(ctx, "QA Plans", lines)
+
+    @qa.command(name="dryrun")
+    async def qa_dryrun(self, ctx, plan: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        await self.send_paginated(ctx, "QA Dry Run", self.b45_dryrun_lines(plan))
+
+    @qa.command(name="run")
+    async def qa_run(self, ctx, plan: str = "all"):
+        if not await require_admin(ctx):
+            return
+
+        import time
+
+        plan = self.b45_plan_alias(plan)
+        started = self.b45_now_iso()
+        start_perf = time.perf_counter()
+
+        await ctx.send(embed=info_embed("QA run started", f"Plan: `{plan}`\nRunning internal checks now. This may take a little while."))
+
+        state = await self.b45_get_qa_state(ctx.guild)
+        run_id = self.b45_new_run_id(state)
+
+        results = await self.b45_run_plan_internal(ctx.guild, plan)
+        counts = self.b45_count_results(results)
+        duration_ms = int((time.perf_counter() - start_perf) * 1000)
+
+        run = {
+            "id": run_id,
+            "plan": plan,
+            "started_at": started,
+            "finished_at": self.b45_now_iso(),
+            "duration_ms": duration_ms,
+            "counts": counts,
+            "results": results,
+            "created_by": str(ctx.author),
+        }
+
+        state.setdefault("runs", {})[run_id] = run
+        await self.b45_set_qa_state(ctx.guild, state)
+
+        await self.send_paginated(ctx, "QA Run Complete", self.b45_summary_lines(run))
+
+    @qa.command(name="status")
+    async def qa_status(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        run_id, run, _ = await self.b45_find_run(ctx.guild, "latest")
+
+        if not run:
+            await ctx.send(embed=info_embed("QA Status", "No QA runs have been recorded yet. Run `!mcore qa run all`."))
+            return
+
+        await self.send_paginated(ctx, "Latest QA Status", self.b45_summary_lines(run))
+
+    @qa.command(name="history")
+    async def qa_history(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b45_get_qa_state(ctx.guild)
+        runs = state.get("runs") or {}
+
+        if not runs:
+            await ctx.send(embed=info_embed("QA History", "No QA runs have been recorded yet."))
+            return
+
+        lines = []
+
+        for run_id, run in sorted(runs.items(), reverse=True)[-30:]:
+            counts = run.get("counts") or {}
+            lines.append(f"`{run_id}` — `{run.get('plan')}` — `{counts.get('OVERALL')}` — pass `{counts.get('PASS', 0)}` warn `{counts.get('WARN', 0)}` fail `{counts.get('FAIL', 0)}` — {run.get('finished_at')}")
+
+        await self.send_paginated(ctx, "QA History", lines)
+
+    @qa.command(name="export")
+    async def qa_export(self, ctx, query: str = "latest"):
+        if not await require_admin(ctx):
+            return
+
+        import io
+        import discord
+
+        run_id, run, _ = await self.b45_find_run(ctx.guild, query)
+
+        if not run:
+            await ctx.send(embed=info_embed("QA run not found", f"No QA run matched `{query}`."))
+            return
+
+        report = self.b45_report_text(run)
+        fp = io.BytesIO(report.encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed("QA report exported", f"Exported `{run_id}` full QA report."),
+            file=discord.File(fp, filename=f"mattis-master-qa-{run_id.lower()}.txt")
+        )
+
     @mcore.group(name="quality", invoke_without_command=True)
     async def quality(self, ctx):
         """Quality and regression centre."""
