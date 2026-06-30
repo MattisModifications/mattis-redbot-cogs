@@ -2737,28 +2737,32 @@ class MattisCore(commands.Cog):
         return counts
 
 
+
+
     def b45_plan_alias(self, plan):
         p = str(plan or "all").lower().strip()
         p = p.replace("_", "-")
 
         aliases = {
-            "latest": "b32-b44",
             "everything": "all",
             "full": "all",
+            "latest": "b59-b72",
+            "next": "b59-b72",
+            "newest": "b59-b72",
+            "final-completion": "b59-b72",
+            "completion": "b59-b72",
+            "rest": "b59-b72",
             "prod": "production",
             "core": "b1-b10",
             "contracts": "b11-b18",
             "ops": "b19-b31",
             "final": "b32-b44",
-            "b31-b44": "b31-b44",
-
-            # Preserve original QA intentions as first-class plans.
             "qa": "quality",
-            "quality": "quality",
             "regression": "quality",
             "post-batch": "quality",
             "postbatch": "quality",
             "smoke": "quality",
+            "future": "future",
         }
 
         return aliases.get(p, p)
@@ -2766,15 +2770,19 @@ class MattisCore(commands.Cog):
 
     def b45_available_plans(self):
         return {
-            "all": "Runs every QA check across B1-B44 plus cogs/command registration.",
+            "all": "Runs every QA check across every installed batch, including B59-B72 and future registered batches.",
+            "latest": "Alias for the newest installed batch plan: B59-B72.",
             "quality": "Original QA purpose: regression, command health, state health, production quality and post-batch checks.",
             "regression": "Alias of quality. Confirms new changes did not break older systems.",
+            "future": "Runs registered future-batch command group checks.",
             "cogs": "Checks core cogs/command groups are loaded and registered.",
             "b1-b10": "Core routing, doctor, prod readiness, alerts/logs, incidents, ops/governance.",
             "b11-b18": "Contracts, backups, releases, evidence, service catalogue, monitoring, comms, changelog.",
             "b19-b31": "SLO, impact, runbooks, posture, secrets, config, DB/cache, webhooks/OAuth, retention, board.",
             "b31-b44": "Board through finalops, including B32-B44 test systems.",
             "b32-b44": "Quality, health matrix, support/billing ops, access review, vendors, maintenance, DR, launch, KB, packs, finalops.",
+            "b46-b58": "Remediation, endpointops, scheduler, entitlement, SLA, noise filters, controls, assets, deployops, backupauto, postmortem, docs, systemmap.",
+            "b59-b72": "Final completion: notification ops, status ops, uptime, API versions, privacy, CAB, release calendar, training, onboarding, revenue, procurement, risk, continuity, audit seal.",
             "production": "Production readiness, contracts, backup, monitors, board, final go/no-go.",
             "security": "Posture, secret ledger, config compliance, OAuth/webhook verification.",
             "launch": "Launch gate, maintenance, DR drill, evidence packs, finalops.",
@@ -2787,7 +2795,7 @@ class MattisCore(commands.Cog):
         plan = self.b45_plan_alias(plan)
 
         if plan == "all":
-            return ["cogs", "b1-b10", "b11-b18", "b19-b31", "b32-b44"]
+            return ["cogs", "b1-b10", "b11-b18", "b19-b31", "b32-b44", "b46-b58", "b59-b72", "future"]
 
         if plan == "quality":
             return ["cogs", "prod", "contracts", "backup", "monitoring", "quality", "healthmatrix", "board", "finalops"]
@@ -2809,6 +2817,15 @@ class MattisCore(commands.Cog):
 
         if plan == "evidence":
             return ["evidence", "pack", "release", "incident"]
+
+        if plan == "future":
+            return ["future"]
+
+        if plan == "b46-b58":
+            return ["b46-b58"]
+
+        if plan == "b59-b72":
+            return ["b59-b72"]
 
         return [plan]
 
@@ -2863,21 +2880,24 @@ class MattisCore(commands.Cog):
             ))
             return None
 
-    def b45_check_command_groups(self, plan):
-        expected = []
 
-        if plan in ["all", "cogs", "b1-b10"]:
-            expected += [
+
+    def b45_check_command_groups(self, plan):
+        plan = self.b45_plan_alias(plan)
+
+        groups = {
+            "cogs": [
+                "mcore",
+            ],
+            "b1-b10": [
                 "mcore",
                 "mcore prod",
                 "mcore incident",
                 "mcore ops",
                 "mcore alerts",
                 "mcore logs",
-            ]
-
-        if plan in ["all", "b11-b18"]:
-            expected += [
+            ],
+            "b11-b18": [
                 "mcore contract",
                 "mcore backup",
                 "mcore release",
@@ -2886,10 +2906,8 @@ class MattisCore(commands.Cog):
                 "mcore monitor",
                 "mcore comms",
                 "mcore changelog",
-            ]
-
-        if plan in ["all", "b19-b31"]:
-            expected += [
+            ],
+            "b19-b31": [
                 "mcore slo",
                 "mcore impact",
                 "mcore runbook",
@@ -2902,10 +2920,8 @@ class MattisCore(commands.Cog):
                 "mcore oauth",
                 "mcore retention",
                 "mcore board",
-            ]
-
-        if plan in ["all", "b31-b44", "b32-b44"]:
-            expected += [
+            ],
+            "b32-b44": [
                 "mcore board",
                 "mcore quality",
                 "mcore healthmatrix",
@@ -2920,15 +2936,62 @@ class MattisCore(commands.Cog):
                 "mcore customercomms",
                 "mcore pack",
                 "mcore finalops",
-            ]
+            ],
+            "b46-b58": [
+                "mcore remediate",
+                "mcore endpointops",
+                "mcore scheduler",
+                "mcore entitlement",
+                "mcore slaops",
+                "mcore noisefilter",
+                "mcore controls",
+                "mcore assets",
+                "mcore deployops",
+                "mcore backupauto",
+                "mcore postmortem",
+                "mcore docs",
+                "mcore systemmap",
+            ],
+            "b59-b72": [
+                "mcore notifyops",
+                "mcore statusops",
+                "mcore uptimeops",
+                "mcore apiversion",
+                "mcore privacyops",
+                "mcore cab",
+                "mcore relcalendar",
+                "mcore trainingops",
+                "mcore onboarding",
+                "mcore revenueops",
+                "mcore procurement",
+                "mcore riskops",
+                "mcore bcops",
+                "mcore auditseal",
+            ],
+        }
 
+        wanted = []
+
+        if plan == "all":
+            for key in ["cogs", "b1-b10", "b11-b18", "b19-b31", "b32-b44", "b46-b58", "b59-b72"]:
+                wanted.extend(groups.get(key, []))
+        else:
+            wanted.extend(groups.get(plan, []))
+
+        dedupe = self.b45_dedupe_list if hasattr(self, "b45_dedupe_list") else lambda items: list(dict.fromkeys(items))
         results = []
 
-        for command in self.b45_dedupe_list(expected):
+        for command in dedupe(wanted):
             if self.b45_command_exists(command):
                 results.append(self.b45_result("PASS", "command-registration", command, "Command group is registered."))
             else:
-                results.append(self.b45_result("FAIL", "command-registration", command, "Command group is missing.", f"Reload mattis_core. If still missing, re-run the batch patch that introduced `{command}`."))
+                results.append(self.b45_result(
+                    "FAIL",
+                    "command-registration",
+                    command,
+                    "Command group is missing.",
+                    f"Reload mattis_core. If still missing, re-run the batch patch that introduced `{command}`."
+                ))
 
         return results
 
@@ -3312,6 +3375,8 @@ class MattisCore(commands.Cog):
             except Exception as e:
                 results.append(self.b45_result("FAIL", "customercomms", "state write/read", f"{type(e).__name__}: {e}", "Repair B42 customer comms methods."))
 
+
+
     async def b45_run_plan_internal(self, guild, plan):
         plan = self.b45_plan_alias(plan)
         areas = self.b45_plan_areas(plan)
@@ -3331,6 +3396,18 @@ class MattisCore(commands.Cog):
 
         if "b32-b44" in areas or any(x in areas for x in ["quality", "healthmatrix", "supportops", "billingops", "accessreview", "vendor", "maintenance", "drill", "launch", "kb", "customercomms", "pack", "finalops"]):
             results.extend(await self.b45_test_b32_b44(guild))
+
+        if "b46-b58" in areas:
+            if hasattr(self, "b45_test_b46_b58"):
+                results.extend(await self.b45_test_b46_b58(guild))
+            else:
+                results.append(self.b45_result("FAIL", "b46-b58", "QA method missing", "b45_test_b46_b58 is missing.", "Re-run B45B/B46-B58 patch."))
+
+        if "b59-b72" in areas:
+            results.extend(await self.b45_test_b59_b72(guild))
+
+        if "future" in areas:
+            results.extend(await self.b45_test_future_registered(guild))
 
         if "board" in areas and "b19-b31" not in areas:
             if hasattr(self, "b31_board_data") and hasattr(self, "b31_board_lines"):
@@ -3447,6 +3524,1326 @@ class MattisCore(commands.Cog):
 
         return None, None, state
 
+
+
+    async def b45_get_future_registry(self, guild):
+        state = await self.b45_get_qa_state(guild)
+        future = state.get("future_batches") or {}
+
+        if not isinstance(future, dict):
+            future = {}
+
+        future.setdefault("b46-b58", {
+            "plan": "b46-b58",
+            "description": "Remediation, endpoint operations, scheduler, entitlement, SLA, noise filters, controls, assets, deployment, backups, postmortems, docs, system map.",
+            "commands": [
+                "mcore remediate",
+                "mcore endpointops",
+                "mcore scheduler",
+                "mcore entitlement",
+                "mcore slaops",
+                "mcore noisefilter",
+                "mcore controls",
+                "mcore assets",
+                "mcore deployops",
+                "mcore backupauto",
+                "mcore postmortem",
+                "mcore docs",
+                "mcore systemmap",
+            ],
+            "installed": True,
+        })
+
+        future.setdefault("b59-b72", {
+            "plan": "b59-b72",
+            "description": "Final completion pack: notifications, status, uptime, API versions, privacy, CAB, release calendar, training, onboarding, revenue, procurement, risk, continuity, final audit seal.",
+            "commands": [
+                "mcore notifyops",
+                "mcore statusops",
+                "mcore uptimeops",
+                "mcore apiversion",
+                "mcore privacyops",
+                "mcore cab",
+                "mcore relcalendar",
+                "mcore trainingops",
+                "mcore onboarding",
+                "mcore revenueops",
+                "mcore procurement",
+                "mcore riskops",
+                "mcore bcops",
+                "mcore auditseal",
+            ],
+            "installed": True,
+        })
+
+        state["future_batches"] = future
+        await self.b45_set_qa_state(guild, state)
+        return future
+
+    async def b45_test_future_registered(self, guild):
+        results = []
+        future = await self.b45_get_future_registry(guild)
+
+        if not future:
+            results.append(self.b45_result("SKIP", "future", "registered future batches", "No future batches registered yet."))
+            return results
+
+        for plan, item in sorted(future.items()):
+            commands = item.get("commands") or []
+
+            if not commands:
+                results.append(self.b45_result("WARN", "future", plan, "Future batch has no command groups registered.", "Use `!mcore qa register-batch <plan> <commands> | <notes>`."))
+                continue
+
+            for command in commands:
+                if self.b45_command_exists(command):
+                    results.append(self.b45_result("PASS", f"future:{plan}", command, "Future batch command group is registered."))
+                else:
+                    results.append(self.b45_result("FAIL", f"future:{plan}", command, "Future batch command group missing.", f"Install/reload the batch that provides `{command}`."))
+
+        return results
+
+    async def b45_test_b46_b58(self, guild):
+        results = []
+        results.extend(self.b45_check_command_groups("b46-b58"))
+
+        systems = [
+            ("remediate", "b46_remediation_centre", "REM"),
+            ("endpointops", "b47_endpoint_operations", "END"),
+            ("scheduler", "b48_scheduler_register", "SCH"),
+            ("entitlement", "b49_entitlement_reviews", "ENT"),
+            ("slaops", "b50_sla_operations", "SLA"),
+            ("noisefilter", "b51_audit_noise_filters", "NOI"),
+            ("controls", "b52_compliance_controls", "CTL"),
+            ("assets", "b53_asset_inventory", "AST"),
+            ("deployops", "b54_deployment_operations", "DEP"),
+            ("backupauto", "b55_backup_automation", "BAK"),
+            ("postmortem", "b56_postmortem_centre", "PM"),
+            ("docs", "b57_documentation_centre", "DOC"),
+            ("systemmap", "b58_system_map", "MAP"),
+        ]
+
+        for area, key, prefix in systems:
+            if not hasattr(self, "b46_record_generic"):
+                results.append(self.b45_result("FAIL", area, "generic state writer", "b46_record_generic helper missing.", "Re-run B46-B58 patch."))
+                continue
+
+            try:
+                record_id = await self.b46_record_generic(
+                    guild,
+                    key,
+                    prefix,
+                    "QA automated check",
+                    f"Automated QA write/read check for {area}.",
+                    "B45 QA Runner",
+                    qa_test=True,
+                )
+
+                state = await self.b46_get_state(guild, key)
+                records = state.get("records") or {}
+
+                if record_id in records:
+                    results.append(self.b45_result("PASS", area, "state write/read", f"Created and read `{record_id}`."))
+                else:
+                    results.append(self.b45_result("FAIL", area, "state write/read", f"`{record_id}` was not found after creation.", f"Repair `{area}` state storage."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", area, "state write/read", f"{type(e).__name__}: {e}", f"Repair B46-B58 `{area}` commands/helpers."))
+
+        return results
+
+
+    # ============================================================
+    # B46-B58 — Future production systems
+    # ============================================================
+
+    async def b46_get_state(self, guild, key):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get(key) or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("records", {})
+
+        return state
+
+    async def b46_set_state(self, guild, key, state):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle[key] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b46_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b46_safe(self, value, limit=1600):
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    def b46_new_id(self, state, prefix):
+        try:
+            current = int(state.get("counter", 0) or 0)
+        except Exception:
+            current = 0
+        state["counter"] = current + 1
+        return f"{prefix}-{state['counter']:04d}"
+
+    async def b46_record_generic(self, guild, key, prefix, title, body, created_by, qa_test=False, extra=None):
+        state = await self.b46_get_state(guild, key)
+        record_id = self.b46_new_id(state, prefix)
+
+        record = {
+            "id": record_id,
+            "title": self.b46_safe(title, 240),
+            "body": self.b46_safe(body, 2200),
+            "created_at": self.b46_now_iso(),
+            "created_by": str(created_by),
+            "qa_test": bool(qa_test),
+        }
+
+        if extra and isinstance(extra, dict):
+            record.update(extra)
+
+        state.setdefault("records", {})[record_id] = record
+        await self.b46_set_state(guild, key, state)
+
+        return record_id
+
+    async def b46_list_generic(self, ctx, key, title):
+        state = await self.b46_get_state(ctx.guild, key)
+        records = state.get("records") or {}
+
+        if not records:
+            await ctx.send(embed=info_embed(title, "No records yet."))
+            return
+
+        lines = []
+
+        for record_id, item in sorted(records.items(), reverse=True):
+            qa = " qa" if item.get("qa_test") else ""
+            lines.append(f"`{record_id}`{qa} — {item.get('title')} — by `{item.get('created_by')}` at `{item.get('created_at')}`")
+
+        await self.send_paginated(ctx, title, lines)
+
+    async def b46_export_generic(self, ctx, key, title, filename):
+        import io
+        import discord
+
+        state = await self.b46_get_state(ctx.guild, key)
+        lines = [
+            "Mattis CMS | Systems",
+            title,
+            "=" * 48,
+            "",
+        ]
+
+        for record_id, item in sorted((state.get("records") or {}).items()):
+            lines.extend([
+                f"{record_id} — {item.get('title')}",
+                f"By: {item.get('created_by')}",
+                f"At: {item.get('created_at')}",
+                f"QA: {item.get('qa_test')}",
+                f"Body: {item.get('body')}",
+                "",
+            ])
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed(f"{title} exported", f"Exported `{len(state.get('records') or {})}` record(s)."),
+            file=discord.File(fp, filename=filename)
+        )
+
+    # B46
+
+    async def b45_test_b59_b72(self, guild):
+        results = []
+        results.extend(self.b45_check_command_groups("b59-b72"))
+
+        systems = [
+            ("notifyops", "b59_notification_operations", "NOT"),
+            ("statusops", "b60_status_page_operations", "STS"),
+            ("uptimeops", "b61_uptime_availability_ops", "UPT"),
+            ("apiversion", "b62_api_version_register", "API"),
+            ("privacyops", "b63_privacy_data_requests", "PRI"),
+            ("cab", "b64_change_advisory_board", "CAB"),
+            ("relcalendar", "b65_release_calendar", "CAL"),
+            ("trainingops", "b66_training_readiness", "TRN"),
+            ("onboarding", "b67_customer_onboarding", "ONB"),
+            ("revenueops", "b68_revenue_assurance", "REV"),
+            ("procurement", "b69_procurement_supplier_register", "PRO"),
+            ("riskops", "b70_risk_register", "RSK"),
+            ("bcops", "b71_business_continuity", "BCP"),
+            ("auditseal", "b72_final_audit_seal", "SEAL"),
+        ]
+
+        for area, key, prefix in systems:
+            if not hasattr(self, "b59_record_generic"):
+                results.append(self.b45_result("FAIL", area, "generic state writer", "b59_record_generic helper missing.", "Re-run B59-B72 final completion patch."))
+                continue
+
+            try:
+                record_id = await self.b59_record_generic(
+                    guild,
+                    key,
+                    prefix,
+                    "QA automated check",
+                    f"Automated QA write/read check for {area}.",
+                    "B45 QA Runner",
+                    qa_test=True,
+                )
+
+                state = await self.b59_get_state(guild, key)
+                records = state.get("records") or {}
+
+                if record_id in records:
+                    results.append(self.b45_result("PASS", area, "state write/read", f"Created and read `{record_id}`."))
+                else:
+                    results.append(self.b45_result("FAIL", area, "state write/read", f"`{record_id}` was not found after creation.", f"Repair `{area}` state storage."))
+            except Exception as e:
+                results.append(self.b45_result("FAIL", area, "state write/read", f"{type(e).__name__}: {e}", f"Repair B59-B72 `{area}` commands/helpers."))
+
+        return results
+
+
+    # ============================================================
+    # B59-B72 — Final completion production systems
+    # ============================================================
+
+    async def b59_get_state(self, guild, key):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+
+        state = lifecycle.get(key) or {}
+
+        if not isinstance(state, dict):
+            state = {}
+
+        state.setdefault("counter", 0)
+        state.setdefault("records", {})
+
+        return state
+
+    async def b59_set_state(self, guild, key, state):
+        cfg = await get_core_config(self.bot)
+        lifecycle = await cfg.guild(guild).alert_lifecycle()
+        lifecycle = lifecycle or {}
+        lifecycle[key] = state
+        await cfg.guild(guild).alert_lifecycle.set(lifecycle)
+
+    def b59_now_iso(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def b59_safe(self, value, limit=1800):
+        text = str(value or "")
+        text = text.replace("`", "'")
+        text = text.replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text.strip()[:limit]
+
+    def b59_new_id(self, state, prefix):
+        try:
+            current = int(state.get("counter", 0) or 0)
+        except Exception:
+            current = 0
+        state["counter"] = current + 1
+        return f"{prefix}-{state['counter']:04d}"
+
+    async def b59_record_generic(self, guild, key, prefix, title, body, created_by, qa_test=False, extra=None):
+        state = await self.b59_get_state(guild, key)
+        record_id = self.b59_new_id(state, prefix)
+
+        record = {
+            "id": record_id,
+            "title": self.b59_safe(title, 260),
+            "body": self.b59_safe(body, 2600),
+            "created_at": self.b59_now_iso(),
+            "created_by": str(created_by),
+            "qa_test": bool(qa_test),
+        }
+
+        if isinstance(extra, dict):
+            record.update(extra)
+
+        state.setdefault("records", {})[record_id] = record
+        await self.b59_set_state(guild, key, state)
+
+        return record_id
+
+    async def b59_list_generic(self, ctx, key, title):
+        state = await self.b59_get_state(ctx.guild, key)
+        records = state.get("records") or {}
+
+        if not records:
+            await ctx.send(embed=info_embed(title, "No records yet."))
+            return
+
+        lines = []
+        for record_id, item in sorted(records.items(), reverse=True):
+            qa = " qa" if item.get("qa_test") else ""
+            lines.append(f"`{record_id}`{qa} — {item.get('title')} — by `{item.get('created_by')}` at `{item.get('created_at')}`")
+
+        await self.send_paginated(ctx, title, lines)
+
+    async def b59_export_generic(self, ctx, key, title, filename):
+        import io
+        import discord
+
+        state = await self.b59_get_state(ctx.guild, key)
+        lines = [
+            "Mattis CMS | Systems",
+            title,
+            "=" * 48,
+            "",
+        ]
+
+        for record_id, item in sorted((state.get("records") or {}).items()):
+            lines.extend([
+                f"{record_id} — {item.get('title')}",
+                f"By: {item.get('created_by')}",
+                f"At: {item.get('created_at')}",
+                f"QA: {item.get('qa_test')}",
+                f"Body: {item.get('body')}",
+                "",
+            ])
+
+        fp = io.BytesIO("\n".join(lines).encode("utf-8"))
+
+        await ctx.send(
+            embed=ok_embed(f"{title} exported", f"Exported `{len(state.get('records') or {})}` record(s)."),
+            file=discord.File(fp, filename=filename)
+        )
+
+    # B59
+    @mcore.group(name="notifyops", invoke_without_command=True)
+    async def notifyops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Notification Operations", [
+            "**B59 — Notification Operations**",
+            "`!mcore notifyops rule <name> | <channel/audience> | <trigger>`",
+            "`!mcore notifyops list`",
+            "`!mcore notifyops export`",
+        ])
+
+    @notifyops.command(name="rule")
+    async def notifyops_rule(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "Notification rule"
+        audience = parts[1] if len(parts) > 1 else "Audience TBC"
+        trigger = parts[2] if len(parts) > 2 else "Trigger TBC"
+        rid = await self.b59_record_generic(ctx.guild, "b59_notification_operations", "NOT", name, f"Audience: {audience}. Trigger: {trigger}", ctx.author)
+        await ctx.send(embed=ok_embed("Notification rule recorded", f"`{rid}` — {name}"))
+
+    @notifyops.command(name="list")
+    async def notifyops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b59_notification_operations", "Notification Rules")
+
+    @notifyops.command(name="export")
+    async def notifyops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b59_notification_operations", "Notification Rules", "mattis-notification-operations.txt")
+
+    # B60
+    @mcore.group(name="statusops", invoke_without_command=True)
+    async def statusops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Status Page Operations", [
+            "**B60 — Status Page Operations**",
+            "`!mcore statusops component <name> | <status> | <note>`",
+            "`!mcore statusops list`",
+            "`!mcore statusops export`",
+        ])
+
+    @statusops.command(name="component")
+    async def statusops_component(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "Component"
+        status = parts[1] if len(parts) > 1 else "operational"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b60_status_page_operations", "STS", name, f"Status: {status}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Status component recorded", f"`{rid}` — {name}"))
+
+    @statusops.command(name="list")
+    async def statusops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b60_status_page_operations", "Status Components")
+
+    @statusops.command(name="export")
+    async def statusops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b60_status_page_operations", "Status Components", "mattis-status-page-operations.txt")
+
+    # B61
+    @mcore.group(name="uptimeops", invoke_without_command=True)
+    async def uptimeops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Uptime Operations", [
+            "**B61 — Uptime / Availability Ops**",
+            "`!mcore uptimeops target <service> | <target> | <note>`",
+            "`!mcore uptimeops list`",
+            "`!mcore uptimeops export`",
+        ])
+
+    @uptimeops.command(name="target")
+    async def uptimeops_target(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        service = parts[0] if len(parts) > 0 else "Service"
+        target = parts[1] if len(parts) > 1 else "99.5%"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b61_uptime_availability_ops", "UPT", service, f"Target: {target}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Uptime target recorded", f"`{rid}` — {service}"))
+
+    @uptimeops.command(name="list")
+    async def uptimeops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b61_uptime_availability_ops", "Uptime Targets")
+
+    @uptimeops.command(name="export")
+    async def uptimeops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b61_uptime_availability_ops", "Uptime Targets", "mattis-uptime-operations.txt")
+
+    # B62
+    @mcore.group(name="apiversion", invoke_without_command=True)
+    async def apiversion(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "API Version Register", [
+            "**B62 — API Version / Deprecation Register**",
+            "`!mcore apiversion record <endpoint/version> | <status> | <note>`",
+            "`!mcore apiversion list`",
+            "`!mcore apiversion export`",
+        ])
+
+    @apiversion.command(name="record")
+    async def apiversion_record(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        endpoint = parts[0] if len(parts) > 0 else "Endpoint"
+        status = parts[1] if len(parts) > 1 else "active"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b62_api_version_register", "API", endpoint, f"Status: {status}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("API version record saved", f"`{rid}` — {endpoint}"))
+
+    @apiversion.command(name="list")
+    async def apiversion_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b62_api_version_register", "API Version Records")
+
+    @apiversion.command(name="export")
+    async def apiversion_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b62_api_version_register", "API Version Records", "mattis-api-version-register.txt")
+
+    # B63
+    @mcore.group(name="privacyops", invoke_without_command=True)
+    async def privacyops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Privacy Operations", [
+            "**B63 — Privacy / Data Request Ops**",
+            "`!mcore privacyops request <type> | <status> | <note>`",
+            "`!mcore privacyops list`",
+            "`!mcore privacyops export`",
+        ])
+
+    @privacyops.command(name="request")
+    async def privacyops_request(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        req_type = parts[0] if len(parts) > 0 else "Data request"
+        status = parts[1] if len(parts) > 1 else "open"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b63_privacy_data_requests", "PRI", req_type, f"Status: {status}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Privacy request recorded", f"`{rid}` — {req_type}"))
+
+    @privacyops.command(name="list")
+    async def privacyops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b63_privacy_data_requests", "Privacy Requests")
+
+    @privacyops.command(name="export")
+    async def privacyops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b63_privacy_data_requests", "Privacy Requests", "mattis-privacy-requests.txt")
+
+    # B64
+    @mcore.group(name="cab", invoke_without_command=True)
+    async def cab(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Change Advisory Board", [
+            "**B64 — Change Advisory Board**",
+            "`!mcore cab change <change> | <risk> | <decision>`",
+            "`!mcore cab list`",
+            "`!mcore cab export`",
+        ])
+
+    @cab.command(name="change")
+    async def cab_change(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        change = parts[0] if len(parts) > 0 else "Change"
+        risk = parts[1] if len(parts) > 1 else "Risk TBC"
+        decision = parts[2] if len(parts) > 2 else "Decision TBC"
+        rid = await self.b59_record_generic(ctx.guild, "b64_change_advisory_board", "CAB", change, f"Risk: {risk}. Decision: {decision}", ctx.author)
+        await ctx.send(embed=ok_embed("CAB change recorded", f"`{rid}` — {change}"))
+
+    @cab.command(name="list")
+    async def cab_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b64_change_advisory_board", "CAB Changes")
+
+    @cab.command(name="export")
+    async def cab_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b64_change_advisory_board", "CAB Changes", "mattis-change-advisory-board.txt")
+
+    # B65
+    @mcore.group(name="relcalendar", invoke_without_command=True)
+    async def relcalendar(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Release Calendar", [
+            "**B65 — Release Calendar**",
+            "`!mcore relcalendar release <name> | <window> | <note>`",
+            "`!mcore relcalendar list`",
+            "`!mcore relcalendar export`",
+        ])
+
+    @relcalendar.command(name="release")
+    async def relcalendar_release(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "Release"
+        window = parts[1] if len(parts) > 1 else "Window TBC"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b65_release_calendar", "CAL", name, f"Window: {window}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Release calendar entry recorded", f"`{rid}` — {name}"))
+
+    @relcalendar.command(name="list")
+    async def relcalendar_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b65_release_calendar", "Release Calendar")
+
+    @relcalendar.command(name="export")
+    async def relcalendar_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b65_release_calendar", "Release Calendar", "mattis-release-calendar.txt")
+
+    # B66
+    @mcore.group(name="trainingops", invoke_without_command=True)
+    async def trainingops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Training Readiness", [
+            "**B66 — Staff Training / Readiness**",
+            "`!mcore trainingops item <training> | <audience> | <status>`",
+            "`!mcore trainingops list`",
+            "`!mcore trainingops export`",
+        ])
+
+    @trainingops.command(name="item")
+    async def trainingops_item(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        training = parts[0] if len(parts) > 0 else "Training"
+        audience = parts[1] if len(parts) > 1 else "Staff"
+        status = parts[2] if len(parts) > 2 else "pending"
+        rid = await self.b59_record_generic(ctx.guild, "b66_training_readiness", "TRN", training, f"Audience: {audience}. Status: {status}", ctx.author)
+        await ctx.send(embed=ok_embed("Training item recorded", f"`{rid}` — {training}"))
+
+    @trainingops.command(name="list")
+    async def trainingops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b66_training_readiness", "Training Readiness")
+
+    @trainingops.command(name="export")
+    async def trainingops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b66_training_readiness", "Training Readiness", "mattis-training-readiness.txt")
+
+    # B67
+    @mcore.group(name="onboarding", invoke_without_command=True)
+    async def onboarding(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Customer Onboarding", [
+            "**B67 — Customer Onboarding Ops**",
+            "`!mcore onboarding customer <customer/segment> | <status> | <note>`",
+            "`!mcore onboarding list`",
+            "`!mcore onboarding export`",
+        ])
+
+    @onboarding.command(name="customer")
+    async def onboarding_customer(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        customer = parts[0] if len(parts) > 0 else "Customer"
+        status = parts[1] if len(parts) > 1 else "pending"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b67_customer_onboarding", "ONB", customer, f"Status: {status}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Onboarding record saved", f"`{rid}` — {customer}"))
+
+    @onboarding.command(name="list")
+    async def onboarding_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b67_customer_onboarding", "Customer Onboarding")
+
+    @onboarding.command(name="export")
+    async def onboarding_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b67_customer_onboarding", "Customer Onboarding", "mattis-customer-onboarding.txt")
+
+    # B68
+    @mcore.group(name="revenueops", invoke_without_command=True)
+    async def revenueops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Revenue Assurance", [
+            "**B68 — Revenue Assurance**",
+            "`!mcore revenueops check <area> | <result> | <note>`",
+            "`!mcore revenueops list`",
+            "`!mcore revenueops export`",
+        ])
+
+    @revenueops.command(name="check")
+    async def revenueops_check(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        area = parts[0] if len(parts) > 0 else "Revenue area"
+        result = parts[1] if len(parts) > 1 else "reviewed"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b68_revenue_assurance", "REV", area, f"Result: {result}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Revenue assurance check recorded", f"`{rid}` — {area}"))
+
+    @revenueops.command(name="list")
+    async def revenueops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b68_revenue_assurance", "Revenue Assurance")
+
+    @revenueops.command(name="export")
+    async def revenueops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b68_revenue_assurance", "Revenue Assurance", "mattis-revenue-assurance.txt")
+
+    # B69
+    @mcore.group(name="procurement", invoke_without_command=True)
+    async def procurement(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Procurement Register", [
+            "**B69 — Procurement / Supplier Register**",
+            "`!mcore procurement supplier <supplier> | <service> | <risk>`",
+            "`!mcore procurement list`",
+            "`!mcore procurement export`",
+        ])
+
+    @procurement.command(name="supplier")
+    async def procurement_supplier(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        supplier = parts[0] if len(parts) > 0 else "Supplier"
+        service = parts[1] if len(parts) > 1 else "Service TBC"
+        risk = parts[2] if len(parts) > 2 else "Risk TBC"
+        rid = await self.b59_record_generic(ctx.guild, "b69_procurement_supplier_register", "PRO", supplier, f"Service: {service}. Risk: {risk}", ctx.author)
+        await ctx.send(embed=ok_embed("Supplier recorded", f"`{rid}` — {supplier}"))
+
+    @procurement.command(name="list")
+    async def procurement_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b69_procurement_supplier_register", "Supplier Register")
+
+    @procurement.command(name="export")
+    async def procurement_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b69_procurement_supplier_register", "Supplier Register", "mattis-procurement-supplier-register.txt")
+
+    # B70
+    @mcore.group(name="riskops", invoke_without_command=True)
+    async def riskops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Risk Register", [
+            "**B70 — Risk Register**",
+            "`!mcore riskops risk <risk> | <severity> | <mitigation>`",
+            "`!mcore riskops list`",
+            "`!mcore riskops export`",
+        ])
+
+    @riskops.command(name="risk")
+    async def riskops_risk(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        risk = parts[0] if len(parts) > 0 else "Risk"
+        severity = parts[1] if len(parts) > 1 else "medium"
+        mitigation = parts[2] if len(parts) > 2 else "Mitigation TBC"
+        rid = await self.b59_record_generic(ctx.guild, "b70_risk_register", "RSK", risk, f"Severity: {severity}. Mitigation: {mitigation}", ctx.author)
+        await ctx.send(embed=ok_embed("Risk recorded", f"`{rid}` — {risk}"))
+
+    @riskops.command(name="list")
+    async def riskops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b70_risk_register", "Risk Register")
+
+    @riskops.command(name="export")
+    async def riskops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b70_risk_register", "Risk Register", "mattis-risk-register.txt")
+
+    # B71
+    @mcore.group(name="bcops", invoke_without_command=True)
+    async def bcops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Business Continuity", [
+            "**B71 — Business Continuity Ops**",
+            "`!mcore bcops plan <scenario> | <response> | <owner>`",
+            "`!mcore bcops list`",
+            "`!mcore bcops export`",
+        ])
+
+    @bcops.command(name="plan")
+    async def bcops_plan(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        scenario = parts[0] if len(parts) > 0 else "Scenario"
+        response = parts[1] if len(parts) > 1 else "Response TBC"
+        owner = parts[2] if len(parts) > 2 else "Owner TBC"
+        rid = await self.b59_record_generic(ctx.guild, "b71_business_continuity", "BCP", scenario, f"Response: {response}. Owner: {owner}", ctx.author)
+        await ctx.send(embed=ok_embed("Business continuity plan recorded", f"`{rid}` — {scenario}"))
+
+    @bcops.command(name="list")
+    async def bcops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b71_business_continuity", "Business Continuity Plans")
+
+    @bcops.command(name="export")
+    async def bcops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b71_business_continuity", "Business Continuity Plans", "mattis-business-continuity.txt")
+
+    # B72
+    @mcore.group(name="auditseal", invoke_without_command=True)
+    async def auditseal(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Final Audit Seal", [
+            "**B72 — Final Audit Seal**",
+            "`!mcore auditseal seal <area> | <decision> | <note>`",
+            "`!mcore auditseal list`",
+            "`!mcore auditseal export`",
+        ])
+
+    @auditseal.command(name="seal")
+    async def auditseal_seal(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        area = parts[0] if len(parts) > 0 else "Production"
+        decision = parts[1] if len(parts) > 1 else "sealed"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b59_record_generic(ctx.guild, "b72_final_audit_seal", "SEAL", area, f"Decision: {decision}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("Final audit seal recorded", f"`{rid}` — {area}"))
+
+    @auditseal.command(name="list")
+    async def auditseal_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_list_generic(ctx, "b72_final_audit_seal", "Final Audit Seals")
+
+    @auditseal.command(name="export")
+    async def auditseal_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b59_export_generic(ctx, "b72_final_audit_seal", "Final Audit Seals", "mattis-final-audit-seal.txt")
+
+    @mcore.group(name="remediate", invoke_without_command=True)
+    async def remediate(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Remediation Centre", [
+            "**B46 — Remediation Centre**",
+            "`!mcore remediate plan <issue> | <fix>`",
+            "`!mcore remediate list`",
+            "`!mcore remediate export`",
+        ])
+
+    @remediate.command(name="plan")
+    async def remediate_plan(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        issue, fix = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Fix TBC")
+        rid = await self.b46_record_generic(ctx.guild, "b46_remediation_centre", "REM", issue, fix, ctx.author)
+        await ctx.send(embed=ok_embed("Remediation plan recorded", f"`{rid}` — {issue}"))
+
+    @remediate.command(name="list")
+    async def remediate_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b46_remediation_centre", "Remediation Plans")
+
+    @remediate.command(name="export")
+    async def remediate_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b46_remediation_centre", "Remediation Plans", "mattis-remediation-plans.txt")
+
+    # B47
+    @mcore.group(name="endpointops", invoke_without_command=True)
+    async def endpointops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Endpoint Operations", [
+            "**B47 — Endpoint Operations**",
+            "`!mcore endpointops verify <endpoint> | <note>`",
+            "`!mcore endpointops list`",
+            "`!mcore endpointops export`",
+        ])
+
+    @endpointops.command(name="verify")
+    async def endpointops_verify(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        endpoint, note = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Verified.")
+        rid = await self.b46_record_generic(ctx.guild, "b47_endpoint_operations", "END", endpoint, note, ctx.author)
+        await ctx.send(embed=ok_embed("Endpoint verification recorded", f"`{rid}` — {endpoint}"))
+
+    @endpointops.command(name="list")
+    async def endpointops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b47_endpoint_operations", "Endpoint Verifications")
+
+    @endpointops.command(name="export")
+    async def endpointops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b47_endpoint_operations", "Endpoint Verifications", "mattis-endpoint-operations.txt")
+
+    # B48
+    @mcore.group(name="scheduler", invoke_without_command=True)
+    async def scheduler(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Scheduler Register", [
+            "**B48 — Scheduler / Task Register**",
+            "`!mcore scheduler task <name> | <cadence> | <action>`",
+            "`!mcore scheduler list`",
+            "`!mcore scheduler export`",
+        ])
+
+    @scheduler.command(name="task")
+    async def scheduler_task(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "Task"
+        cadence = parts[1] if len(parts) > 1 else "Cadence TBC"
+        action = parts[2] if len(parts) > 2 else "Action TBC"
+        rid = await self.b46_record_generic(ctx.guild, "b48_scheduler_register", "SCH", name, f"Cadence: {cadence}. Action: {action}", ctx.author)
+        await ctx.send(embed=ok_embed("Scheduler task recorded", f"`{rid}` — {name}"))
+
+    @scheduler.command(name="list")
+    async def scheduler_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b48_scheduler_register", "Scheduler Tasks")
+
+    @scheduler.command(name="export")
+    async def scheduler_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b48_scheduler_register", "Scheduler Tasks", "mattis-scheduler-tasks.txt")
+
+    # B49
+    @mcore.group(name="entitlement", invoke_without_command=True)
+    async def entitlement(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Entitlement Reviews", [
+            "**B49 — Entitlement Review Centre**",
+            "`!mcore entitlement review <customer/system> | <note>`",
+            "`!mcore entitlement list`",
+            "`!mcore entitlement export`",
+        ])
+
+    @entitlement.command(name="review")
+    async def entitlement_review(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        target, note = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Review recorded.")
+        rid = await self.b46_record_generic(ctx.guild, "b49_entitlement_reviews", "ENT", target, note, ctx.author)
+        await ctx.send(embed=ok_embed("Entitlement review recorded", f"`{rid}` — {target}"))
+
+    @entitlement.command(name="list")
+    async def entitlement_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b49_entitlement_reviews", "Entitlement Reviews")
+
+    @entitlement.command(name="export")
+    async def entitlement_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b49_entitlement_reviews", "Entitlement Reviews", "mattis-entitlement-reviews.txt")
+
+    # B50
+    @mcore.group(name="slaops", invoke_without_command=True)
+    async def slaops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "SLA Operations", [
+            "**B50 — SLA Operations**",
+            "`!mcore slaops policy <name> | <target> | <note>`",
+            "`!mcore slaops list`",
+            "`!mcore slaops export`",
+        ])
+
+    @slaops.command(name="policy")
+    async def slaops_policy(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "SLA"
+        target = parts[1] if len(parts) > 1 else "Target TBC"
+        note = parts[2] if len(parts) > 2 else ""
+        rid = await self.b46_record_generic(ctx.guild, "b50_sla_operations", "SLA", name, f"Target: {target}. {note}", ctx.author)
+        await ctx.send(embed=ok_embed("SLA policy recorded", f"`{rid}` — {name}"))
+
+    @slaops.command(name="list")
+    async def slaops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b50_sla_operations", "SLA Policies")
+
+    @slaops.command(name="export")
+    async def slaops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b50_sla_operations", "SLA Policies", "mattis-sla-operations.txt")
+
+    # B51
+    @mcore.group(name="noisefilter", invoke_without_command=True)
+    async def noisefilter(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Audit Noise Filters", [
+            "**B51 — Audit Noise Filter Rules**",
+            "`!mcore noisefilter rule <source/query> | <reason>`",
+            "`!mcore noisefilter list`",
+            "`!mcore noisefilter export`",
+        ])
+
+    @noisefilter.command(name="rule")
+    async def noisefilter_rule(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        source, reason = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Expected/noisy event.")
+        rid = await self.b46_record_generic(ctx.guild, "b51_audit_noise_filters", "NOI", source, reason, ctx.author)
+        await ctx.send(embed=ok_embed("Noise filter rule recorded", f"`{rid}` — {source}"))
+
+    @noisefilter.command(name="list")
+    async def noisefilter_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b51_audit_noise_filters", "Audit Noise Rules")
+
+    @noisefilter.command(name="export")
+    async def noisefilter_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b51_audit_noise_filters", "Audit Noise Rules", "mattis-audit-noise-rules.txt")
+
+    # B52
+    @mcore.group(name="controls", invoke_without_command=True)
+    async def controls(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Compliance Controls", [
+            "**B52 — Compliance Controls**",
+            "`!mcore controls control <name> | <evidence>`",
+            "`!mcore controls list`",
+            "`!mcore controls export`",
+        ])
+
+    @controls.command(name="control")
+    async def controls_control(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        name, evidence = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Evidence TBC")
+        rid = await self.b46_record_generic(ctx.guild, "b52_compliance_controls", "CTL", name, evidence, ctx.author)
+        await ctx.send(embed=ok_embed("Compliance control recorded", f"`{rid}` — {name}"))
+
+    @controls.command(name="list")
+    async def controls_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b52_compliance_controls", "Compliance Controls")
+
+    @controls.command(name="export")
+    async def controls_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b52_compliance_controls", "Compliance Controls", "mattis-compliance-controls.txt")
+
+    # B53
+    @mcore.group(name="assets", invoke_without_command=True)
+    async def assets(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Asset Inventory", [
+            "**B53 — Asset Inventory**",
+            "`!mcore assets asset <name> | <owner> | <risk>`",
+            "`!mcore assets list`",
+            "`!mcore assets export`",
+        ])
+
+    @assets.command(name="asset")
+    async def assets_asset(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        name = parts[0] if len(parts) > 0 else "Asset"
+        owner = parts[1] if len(parts) > 1 else "Owner TBC"
+        risk = parts[2] if len(parts) > 2 else "Risk TBC"
+        rid = await self.b46_record_generic(ctx.guild, "b53_asset_inventory", "AST", name, f"Owner: {owner}. Risk: {risk}", ctx.author)
+        await ctx.send(embed=ok_embed("Asset recorded", f"`{rid}` — {name}"))
+
+    @assets.command(name="list")
+    async def assets_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b53_asset_inventory", "Asset Inventory")
+
+    @assets.command(name="export")
+    async def assets_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b53_asset_inventory", "Asset Inventory", "mattis-asset-inventory.txt")
+
+    # B54
+    @mcore.group(name="deployops", invoke_without_command=True)
+    async def deployops(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Deployment Operations", [
+            "**B54 — Deployment Operations**",
+            "`!mcore deployops gate <release/name> | <note>`",
+            "`!mcore deployops list`",
+            "`!mcore deployops export`",
+        ])
+
+    @deployops.command(name="gate")
+    async def deployops_gate(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        release, note = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Deployment gate recorded.")
+        rid = await self.b46_record_generic(ctx.guild, "b54_deployment_operations", "DEP", release, note, ctx.author)
+        await ctx.send(embed=ok_embed("Deployment gate recorded", f"`{rid}` — {release}"))
+
+    @deployops.command(name="list")
+    async def deployops_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b54_deployment_operations", "Deployment Gates")
+
+    @deployops.command(name="export")
+    async def deployops_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b54_deployment_operations", "Deployment Gates", "mattis-deployment-operations.txt")
+
+    # B55
+    @mcore.group(name="backupauto", invoke_without_command=True)
+    async def backupauto(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Backup Automation", [
+            "**B55 — Backup Automation Checks**",
+            "`!mcore backupauto check <name> | <note>`",
+            "`!mcore backupauto list`",
+            "`!mcore backupauto export`",
+        ])
+
+    @backupauto.command(name="check")
+    async def backupauto_check(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        name, note = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Backup automation check recorded.")
+        rid = await self.b46_record_generic(ctx.guild, "b55_backup_automation", "BAK", name, note, ctx.author)
+        await ctx.send(embed=ok_embed("Backup automation check recorded", f"`{rid}` — {name}"))
+
+    @backupauto.command(name="list")
+    async def backupauto_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b55_backup_automation", "Backup Automation Checks")
+
+    @backupauto.command(name="export")
+    async def backupauto_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b55_backup_automation", "Backup Automation Checks", "mattis-backup-automation.txt")
+
+    # B56
+    @mcore.group(name="postmortem", invoke_without_command=True)
+    async def postmortem(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Postmortem Centre", [
+            "**B56 — Postmortem Centre**",
+            "`!mcore postmortem create <incident> | <summary>`",
+            "`!mcore postmortem list`",
+            "`!mcore postmortem export`",
+        ])
+
+    @postmortem.command(name="create")
+    async def postmortem_create(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        incident, summary = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Postmortem summary TBC")
+        rid = await self.b46_record_generic(ctx.guild, "b56_postmortem_centre", "PM", incident, summary, ctx.author)
+        await ctx.send(embed=ok_embed("Postmortem recorded", f"`{rid}` — {incident}"))
+
+    @postmortem.command(name="list")
+    async def postmortem_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b56_postmortem_centre", "Postmortems")
+
+    @postmortem.command(name="export")
+    async def postmortem_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b56_postmortem_centre", "Postmortems", "mattis-postmortems.txt")
+
+    # B57
+    @mcore.group(name="docs", invoke_without_command=True)
+    async def docs(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "Documentation Centre", [
+            "**B57 — Documentation Centre**",
+            "`!mcore docs page <title> | <body>`",
+            "`!mcore docs list`",
+            "`!mcore docs export`",
+        ])
+
+    @docs.command(name="page")
+    async def docs_page(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        title, body = [x.strip() for x in text.split("|", 1)] if "|" in text else (text, "Documentation body TBC")
+        rid = await self.b46_record_generic(ctx.guild, "b57_documentation_centre", "DOC", title, body, ctx.author)
+        await ctx.send(embed=ok_embed("Documentation page recorded", f"`{rid}` — {title}"))
+
+    @docs.command(name="list")
+    async def docs_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b57_documentation_centre", "Documentation Pages")
+
+    @docs.command(name="export")
+    async def docs_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b57_documentation_centre", "Documentation Pages", "mattis-documentation-centre.txt")
+
+    # B58
+    @mcore.group(name="systemmap", invoke_without_command=True)
+    async def systemmap(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.send_paginated(ctx, "System Map", [
+            "**B58 — System Dependency Map**",
+            "`!mcore systemmap link <from> | <to> | <reason>`",
+            "`!mcore systemmap list`",
+            "`!mcore systemmap export`",
+        ])
+
+    @systemmap.command(name="link")
+    async def systemmap_link(self, ctx, *, text: str):
+        if not await require_admin(ctx):
+            return
+        parts = [x.strip() for x in text.split("|")]
+        source = parts[0] if len(parts) > 0 else "Source"
+        target = parts[1] if len(parts) > 1 else "Target"
+        reason = parts[2] if len(parts) > 2 else "Dependency"
+        rid = await self.b46_record_generic(ctx.guild, "b58_system_map", "MAP", f"{source} -> {target}", reason, ctx.author)
+        await ctx.send(embed=ok_embed("System dependency recorded", f"`{rid}` — {source} -> {target}"))
+
+    @systemmap.command(name="list")
+    async def systemmap_list(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_list_generic(ctx, "b58_system_map", "System Dependency Map")
+
+    @systemmap.command(name="export")
+    async def systemmap_export(self, ctx):
+        if not await require_admin(ctx):
+            return
+        await self.b46_export_generic(ctx, "b58_system_map", "System Dependency Map", "mattis-system-dependency-map.txt")
+
     @mcore.group(name="qa", invoke_without_command=True)
 
     async def qa(self, ctx):
@@ -3553,6 +4950,74 @@ class MattisCore(commands.Cog):
             return
 
         await self.qa_run(ctx, plan="quality")
+
+
+    @qa.command(name="future")
+    async def qa_future(self, ctx):
+        if not await require_admin(ctx):
+            return
+
+        future = await self.b45_get_future_registry(ctx.guild)
+        lines = ["**Future batch QA registry**", ""]
+
+        for plan, item in sorted(future.items()):
+            lines.append(f"`{plan}` — {item.get('description', 'No description')}")
+            for command in item.get("commands") or []:
+                exists = "✅" if self.b45_command_exists(command) else "❌"
+                lines.append(f"  {exists} `{command}`")
+
+        await self.send_paginated(ctx, "Future QA Registry", lines)
+
+    @qa.command(name="register-batch")
+    async def qa_register_batch(self, ctx, plan: str, *, text: str):
+        if not await require_admin(ctx):
+            return
+
+        if "|" in text:
+            commands_text, description = [x.strip() for x in text.split("|", 1)]
+        else:
+            commands_text = text
+            description = "Registered future QA batch."
+
+        commands = [x.strip() for x in commands_text.split(",") if x.strip()]
+
+        if not commands:
+            await ctx.send(embed=error_embed("No command groups supplied", "Use `!mcore qa register-batch b59-b72 mcore group1, mcore group2 | notes`."))
+            return
+
+        state = await self.b45_get_qa_state(ctx.guild)
+        future = state.get("future_batches") or {}
+
+        future[plan.lower()] = {
+            "plan": plan.lower(),
+            "description": description,
+            "commands": commands,
+            "installed": True,
+            "registered_at": self.b45_now_iso(),
+            "registered_by": str(ctx.author),
+        }
+
+        state["future_batches"] = future
+        await self.b45_set_qa_state(ctx.guild, state)
+
+        await ctx.send(embed=ok_embed("Future QA batch registered", f"`{plan.lower()}` registered with `{len(commands)}` command group(s)."))
+
+    @qa.command(name="unregister-batch")
+    async def qa_unregister_batch(self, ctx, plan: str):
+        if not await require_admin(ctx):
+            return
+
+        state = await self.b45_get_qa_state(ctx.guild)
+        future = state.get("future_batches") or {}
+        removed = future.pop(plan.lower(), None)
+        state["future_batches"] = future
+
+        await self.b45_set_qa_state(ctx.guild, state)
+
+        if removed:
+            await ctx.send(embed=ok_embed("Future QA batch removed", f"`{plan.lower()}` removed."))
+        else:
+            await ctx.send(embed=info_embed("Future QA batch not found", f"`{plan.lower()}` was not registered."))
 
     @qa.command(name="plans")
     async def qa_plans(self, ctx):
